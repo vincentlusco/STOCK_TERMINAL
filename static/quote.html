@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quote - Bloomberg Terminal</title>
+    <base href="/" />
+    <link rel="stylesheet" href="static/css/styles.css">
+    <script>
+        // Check auth before loading page
+        const token = localStorage.getItem('token');
+        if (!token) {
+            window.location.href = '/login';
+        }
+    </script>
+    <!-- Add Plotly -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>BLOOMBERG TERMINAL</h1>
+        <nav class="terminal-nav">
+            <!-- Nav will be populated by nav.js -->
+        </nav>
+        <div class="content">
+            <div class="search-container">
+                <input type="text" id="ticker" placeholder="Enter ticker symbol..." autocomplete="off">
+                <button onclick="getStockData()">GET QUOTE</button>
+                <button onclick="addToWatchlist()">ADD TO WATCHLIST</button>
+            </div>
+            <div id="stockData" class="stock-data"></div>
+        </div>
+    </div>
+    <script src="static/nav.js"></script>
+    <script src="static/script.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            window.location.href = '/login';
+            return;
+        }
+        
+        const originalFetch = window.fetch;
+        window.fetch = function() {
+            let [resource, config] = arguments;
+            if (!config) {
+                config = {};
+            }
+            if (!config.headers) {
+                config.headers = {};
+            }
+            config.headers['Authorization'] = `Bearer ${token}`;
+            return originalFetch(resource, config);
+        };
+    });
+    </script>
+</body>
+</html> 

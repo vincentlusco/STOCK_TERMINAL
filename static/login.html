@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <title>Login - Bloomberg Terminal</title>
+    <link rel="stylesheet" href="static/css/styles.css">
+</head>
+<body>
+    <div class="login-wrapper">
+        <div class="login-container">
+            <h1>BLOOMBERG TERMINAL</h1>
+            <div class="auth-box">
+                <h2>Login</h2>
+                <div id="error-message" class="error-message" style="display: none;"></div>
+                <form id="loginForm">
+                    <div class="input-group">
+                        <input type="text" id="username" placeholder="Username" required>
+                    </div>
+                    <div class="input-group">
+                        <input type="password" id="password" placeholder="Password" required>
+                    </div>
+                    <button type="submit">LOGIN</button>
+                </form>
+                <p class="register-link">Don't have an account? <a href="/register">Register</a></p>
+            </div>
+        </div>
+    </div>
+    <script src="static/auth.js"></script>
+</body>
+</html> 

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Watchlist - Bloomberg Terminal</title>
+    <base href="/" />
+    <link rel="stylesheet" href="static/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>BLOOMBERG TERMINAL</h1>
+        <nav class="terminal-nav">
+            <!-- Nav will be populated by nav.js -->
+        </nav>
+        <div class="content">
+            <div id="watchlistContent" class="watchlist-container">
+                <p class="loading">Loading watchlist...</p>
+            </div>
+        </div>
+    </div>
+    <script src="static/nav.js"></script>
+    <script src="static/script.js"></script>
+    <script>
+        // Check authentication
+        const token = localStorage.getItem('token');
+        if (!token) {
+            window.location.href = '/login';
+        } else {
+            // Initialize watchlist
+            document.addEventListener('DOMContentLoaded', async function() {
+                try {
+                    updateNav(); // Update navigation
+                    updateWatchlist();
+                    setInterval(updateWatchlist, 30000);
+                } catch (error) {
+                    console.error('Error:', error);
+                    window.location.href = '/login';
+                }
+            });
+        }
+    </script>
+</body>
+</html> 
