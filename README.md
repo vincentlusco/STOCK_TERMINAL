@@ -16,7 +16,3 @@ A Bloomberg Terminal-inspired stock market application built with FastAPI and Ja
 - Frontend: HTML, CSS, JavaScript
 - Data: yfinance API
 - Authentication: JWT
-
-## Setup
-
-1. Clone the repository: 
