@@ -22,7 +22,7 @@ class UserInDB(UserBase):
 
 class User(UserBase):
     id: str
-    watchlist: List[str] = []
+    watchlists: List[str] = []
     created_at: datetime
 
     class Config:

@@ -3,75 +3,82 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bloomberg Terminal</title>
-    <link rel="stylesheet" href="/css/styles.css">
+    <title>Stock Quote - Bloomberg Lite</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
 </head>
-<body class="terminal">
-    <div class="terminal-header">
-        <div class="terminal-title">BLOOMBERG TERMINAL</div>
-        <div class="terminal-nav">
-            <a href="/quote" class="active">QUOTES</a>
-            <a href="/watchlist">WATCHLIST</a>
-            <a href="javascript:void(0)" onclick="logout()">LOGOUT</a>
-        </div>
+<body class="main-page">
+    <nav class="terminal-nav">
+        <a href="/quote" class="terminal-btn active">QUOTES</a>
+        <a href="/watchlist" class="terminal-btn">WATCHLIST</a>
+        <button onclick="logout()" class="terminal-btn">LOGOUT</button>
+    </nav>
+
+    <div class="search-container">
+        <input type="text" id="ticker" placeholder="Enter ticker symbol..." class="terminal-input">
+        <button onclick="getStockData()" class="terminal-btn">GET QUOTE</button>
+        <button onclick="addToWatchlist()" class="terminal-btn">ADD TO WATCHLIST</button>
     </div>
 
-    <div class="terminal-main">
-        <div class="search-section">
-            <input type="text" id="ticker" placeholder="Enter ticker symbol..." class="terminal-input">
-            <button onclick="getStockData()" class="terminal-btn">GET QUOTE</button>
-            <button onclick="addToWatchlist(document.getElementById('ticker').value)" class="terminal-btn">ADD TO WATCHLIST</button>
+    <div class="content">
+        <div id="stockData" class="stock-data">
+            <div class="stock-data-main">
+                <div class="stock-name">Tesla, Inc. (TSLA)</div>
+                <div class="stock-info">
+                    <span class="stock-price">$404.60</span>
+                    <span class="stock-change">$0.00 (0.00%)</span>
+                </div>
+            </div>
+            <div class="stock-metrics">
+                <div class="metric">
+                    <span class="metric-label">Market Cap</span>
+                    <span class="metric-value">$1.30T</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Volume</span>
+                    <span class="metric-value">83,089,760</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">52W High</span>
+                    <span class="metric-value">$488.54</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">52W Low</span>
+                    <span class="metric-value">$138.80</span>
+                </div>
+            </div>
         </div>
-
-        <div class="data-section">
-            <div id="stockData" class="stock-data"></div>
-        </div>
-
         <div class="chart-section">
-            <div id="stockChart" class="chart-container"></div>
+            <div id="chartContainer" class="chart-container"></div>
             <div class="chart-controls">
-                <div class="control-row">
-                    <span class="control-label">Chart Type:</span>
-                    <select id="chartType" class="terminal-select">
+                <div class="chart-type">
+                    <span>Chart Type:</span>
+                    <select id="chartType">
                         <option value="candlestick">CANDLESTICK</option>
-                        <option value="line">LINE</option>
-                    </select>
-                    
-                    <span class="control-label">Period:</span>
-                    <select id="timePeriod" class="terminal-select">
-                        <option value="1mo">1M</option>
-                        <option value="3mo">3M</option>
-                        <option value="6mo" selected>6M</option>
-                        <option value="1y">1Y</option>
                     </select>
                 </div>
-                
-                <div class="control-row">
-                    <span class="control-label">Indicators:</span>
-                    <label class="terminal-checkbox">
-                        <input type="checkbox" id="showVolume">
-                        VOL
-                    </label>
-                    <label class="terminal-checkbox">
-                        <input type="checkbox" id="showMA">
-                        MA
-                    </label>
-                    <label class="terminal-checkbox">
-                        <input type="checkbox" id="showBB">
-                        BB
-                    </label>
-                    <label class="terminal-checkbox">
-                        <input type="checkbox" id="showRSI">
-                        RSI
-                    </label>
+                <div class="chart-period">
+                    <span>Period:</span>
+                    <select id="period">
+                        <option value="6M">6M</option>
+                    </select>
+                </div>
+                <div class="chart-indicators">
+                    <span>Indicators:</span>
+                    <label><input type="checkbox" id="vol"> VOL</label>
+                    <label><input type="checkbox" id="ma"> MA</label>
+                    <label><input type="checkbox" id="bb"> BB</label>
+                    <label><input type="checkbox" id="rsi"> RSI</label>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="/js/script.js"></script>
-    <script src="/js/auth.js"></script>
-    <script src="/js/chart.js"></script>
+    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/script.js"></script>
+    <script src="/static/js/chart.js"></script>
 </body>
 </html> 

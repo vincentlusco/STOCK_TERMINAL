@@ -173,22 +173,15 @@ function showError(message) {
     errorDiv.style.display = 'block';
 }
 
-async function register() {
-    const username = document.getElementById('username').value;
-    const email = document.getElementById('email').value;
-    const password = document.getElementById('password').value;
-
+// Remove duplicate register function and consolidate into one
+async function register(username, email, password) {
     try {
         const response = await fetch('/register', {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-                username: username,
-                email: email,
-                password: password
-            })
+            body: JSON.stringify({ username, email, password })
         });
 
         if (!response.ok) {
@@ -196,11 +189,10 @@ async function register() {
             throw new Error(error.detail || 'Registration failed');
         }
 
-        const data = await response.json();
-        localStorage.setItem('token', data.access_token);
-        window.location.href = '/quote';
+        window.location.href = '/login';
     } catch (error) {
-        alert('Registration failed: ' + error.message);
+        console.error('Registration error:', error);
+        throw error;
     }
 }
 
@@ -309,28 +301,6 @@ async function login(username, password) {
         window.location.href = '/quote';
     } catch (error) {
         console.error('Login error:', error);
-        throw error;
-    }
-}
-
-async function register(username, email, password) {
-    try {
-        const response = await fetch('/register', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ username, email, password })
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Registration failed');
-        }
-
-        window.location.href = '/login';
-    } catch (error) {
-        console.error('Registration error:', error);
         throw error;
     }
 }

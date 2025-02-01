@@ -13,124 +13,142 @@ from . import settings as app_settings
 from fastapi import HTTPException
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
+import os
 
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)  # Changed to DEBUG for more details
 logger = logging.getLogger(__name__)
 
+# Get MongoDB connection string from environment variable or use default
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+logger.info(f"Initializing DatabaseService with URI: {MONGODB_URI}")
+
+# Initialize database service
+db_service = None
+
+async def init_db_service():
+    global db_service
+    if db_service is None:
+        db_service = DatabaseService(MONGODB_URI)
+        await db_service._init_indexes()
+    return db_service
+
 class StockService:
-    def __init__(self):
-        """Initialize StockService"""
-        self.db_service = None
-        self.db = None
+    def __init__(self, db_service=None):
+        self.db_service = db_service
         self._cache_lock = asyncio.Lock()
         self._batch_size = 10  # For bulk operations
         logger.info("StockService initialized")
 
-    def set_db_service(self, db_service):
-        """Set the database service instance"""
-        if db_service is not None:  # Proper None check
-            self.db_service = db_service
-            self.db = db_service.db
-            logger.info("Database service set for StockService")
+    async def ensure_db_service(self):
+        if self.db_service is None:
+            self.db_service = await init_db_service()
 
-    async def init_db(self) -> None:
-        """Initialize database connection"""
+    async def get_stock_data(self, symbol: str) -> Dict[str, Any]:
+        await self.ensure_db_service()
         try:
-            if self.db is None:  # Proper None check
-                self.db = await get_mongo_db()
-                logger.info("StockService initialized with MongoDB connection")
-        except Exception as e:
-            logger.error(f"Failed to initialize StockService: {str(e)}")
-            raise
+            # Check cache first
+            cached_data = await self.db_service.get_stock_data(symbol)
+            if cached_data and (datetime.now() - cached_data.get('timestamp', datetime.min)).seconds < 300:
+                return cached_data
 
-    async def get_stock_data(self, symbol: str):
-        try:
-            if self.db is None:
-                await self.init_db()
+            # Fetch from yfinance if not cached or expired
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            
+            if not info:
+                raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
 
-            collection = self.db[app_settings.STOCKS_COLLECTION]
-            stock_data = await collection.find_one({"symbol": symbol})
-            
-            if stock_data is None or (datetime.now() - stock_data.get('timestamp', datetime.min)).seconds > 300:
-                logger.info(f"Fetching {symbol} data from yfinance")
-                ticker = yf.Ticker(symbol)
-                
-                try:
-                    info = ticker.info
-                    if not info:
-                        raise HTTPException(status_code=404, detail=f"Stock data not found for {symbol}")
-                    
-                    # Get current price and calculate changes
-                    current_price = info.get("regularMarketPrice", 0)
-                    previous_close = info.get("previousClose", 0)
-                    price_change = current_price - previous_close if current_price and previous_close else 0
-                    price_change_percent = (price_change / previous_close * 100) if previous_close else 0
-                    
-                    stock_data = {
-                        "symbol": symbol,
-                        "company_name": info.get("longName", ""),
-                        "current_price": float(current_price),
-                        "price_change": float(price_change),
-                        "price_change_percent": float(price_change_percent),
-                        "previous_close": float(previous_close),
-                        "volume": int(info.get("regularMarketVolume", 0)),
-                        "market_cap": float(info.get("marketCap", 0)),
-                        "timestamp": datetime.utcnow()
-                    }
-                    
-                    await collection.update_one(
-                        {"symbol": symbol},
-                        {"$set": stock_data},
-                        upsert=True
-                    )
-                    
-                    return StockData(**stock_data)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing data for {symbol}: {str(e)}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Error processing stock data: {str(e)}"
-                    )
-            
-            # Convert database data to StockData object
-            stock_dict = {
-                "symbol": stock_data.get("symbol"),
-                "company_name": stock_data.get("company_name", ""),
-                "current_price": float(stock_data.get("current_price", 0)),
-                "price_change": float(stock_data.get("price_change", 0)),
-                "price_change_percent": float(stock_data.get("price_change_percent", 0)),
-                "previous_close": float(stock_data.get("previous_close", 0)),
-                "volume": int(stock_data.get("volume", 0)),
-                "market_cap": float(stock_data.get("market_cap", 0)),
-                "timestamp": stock_data.get("timestamp", datetime.utcnow())
+            stock_data = {
+                "symbol": symbol.upper(),
+                "company_name": info.get("longName", ""),
+                "current_price": float(info.get("currentPrice", 0) or info.get("regularMarketPrice", 0)),
+                "price_change": float(info.get("regularMarketChange", 0)),
+                "price_change_percent": float(info.get("regularMarketChangePercent", 0)),
+                "previous_close": float(info.get("previousClose", 0)),
+                "open": float(info.get("regularMarketOpen", 0)),
+                "day_high": float(info.get("regularMarketDayHigh", 0)),
+                "day_low": float(info.get("regularMarketDayLow", 0)),
+                "volume": int(info.get("regularMarketVolume", 0)),
+                "market_cap": float(info.get("marketCap", 0)),
+                "pe_ratio": float(info.get("trailingPE", 0) or 0),
+                "52w_high": float(info.get("fiftyTwoWeekHigh", 0)),
+                "52w_low": float(info.get("fiftyTwoWeekLow", 0)),
+                "timestamp": datetime.now()
             }
-            return StockData(**stock_dict)
-        
+
+            # Cache the data
+            try:
+                await self.db_service.store_stock_data(stock_data)
+            except Exception as cache_error:
+                logger.warning(f"Cache error (non-critical): {str(cache_error)}")
+
+            return stock_data
+
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Unexpected error fetching stock data for {symbol}: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Unexpected error fetching stock data: {str(e)}"
-            )
+            logger.error(f"Error fetching stock data for {symbol}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def get_stock_chart_data(self, symbol: str, period: str = "6mo") -> Dict[str, Any]:
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period=period)
+            
+            if hist.empty:
+                raise HTTPException(status_code=404, detail=f"No chart data found for {symbol}")
+            
+            chart_data = {
+                "dates": hist.index.strftime('%Y-%m-%d').tolist(),
+                "opens": hist['Open'].round(2).tolist(),
+                "highs": hist['High'].round(2).tolist(),
+                "lows": hist['Low'].round(2).tolist(),
+                "prices": hist['Close'].round(2).tolist(),
+                "volumes": hist['Volume'].tolist()
+            }
+            
+            return chart_data
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching chart data for {symbol}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
     async def get_batch_stock_data(self, tickers: List[str]) -> Dict[str, StockData]:
         """Efficiently fetch multiple stocks"""
         results = {}
         tasks = []
         
-        for chunk in [tickers[i:i + self._batch_size] for i in range(0, len(tickers), self._batch_size)]:
-            for ticker in chunk:
-                tasks.append(asyncio.create_task(self.get_stock_data(ticker)))
-            
-            completed = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for ticker, result in zip(chunk, completed):
-                if isinstance(result, Exception):
-                    logger.error(f"Failed to fetch {ticker}: {result}")
-                elif result:
-                    results[ticker] = result
+        if not tickers:
+            logger.debug("No tickers provided for batch stock data")
+            return results
         
-        return results
+        logger.debug(f"Fetching batch stock data for tickers: {tickers}")
+        
+        try:
+            for chunk in [tickers[i:i + self._batch_size] for i in range(0, len(tickers), self._batch_size)]:
+                logger.debug(f"Processing chunk: {chunk}")
+                for ticker in chunk:
+                    tasks.append(asyncio.create_task(self.get_stock_data(ticker)))
+                
+                completed = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for ticker, result in zip(chunk, completed):
+                    if isinstance(result, Exception):
+                        logger.error(f"Failed to fetch {ticker}: {result}")
+                        results[ticker] = None
+                    elif result:
+                        results[ticker] = result
+                
+                tasks = []  # Clear tasks for next chunk
+            
+            logger.debug(f"Batch processing complete. Results for {len(results)} tickers")
+            return results
+        except Exception as e:
+            logger.exception(f"Error in batch stock data processing: {str(e)}")
+            return results
 
     async def get_stock_history(self, symbol: str, period: str = '6mo'):
         try:
@@ -160,4 +178,51 @@ class StockService:
             raise HTTPException(
                 status_code=500,
                 detail=f"Error fetching stock history: {str(e)}"
-            ) 
+            )
+
+# Initialize global stock service
+stock_service = StockService()
+
+# These functions are for backward compatibility
+async def get_stock_data(symbol: str) -> Dict[str, Any]:
+    return await stock_service.get_stock_data(symbol)
+
+async def get_stock_chart_data(symbol: str, period: str = "6mo") -> Dict[str, Any]:
+    return await stock_service.get_stock_chart_data(symbol)
+
+def format_market_cap(market_cap: float) -> str:
+    """
+    Format market cap value to human readable string (e.g., 1.5T, 234.5B)
+    """
+    try:
+        if market_cap >= 1e12:
+            return f"${market_cap/1e12:.2f}T"
+        elif market_cap >= 1e9:
+            return f"${market_cap/1e9:.2f}B"
+        elif market_cap >= 1e6:
+            return f"${market_cap/1e6:.2f}M"
+        else:
+            return f"${market_cap:.2f}"
+    except Exception as e:
+        logger.error(f"Error formatting market cap: {str(e)}")
+        return "N/A"
+
+def format_volume(volume: int) -> str:
+    """
+    Format volume value to human readable string
+    """
+    try:
+        if volume >= 1e9:
+            return f"{volume/1e9:.2f}B"
+        elif volume >= 1e6:
+            return f"{volume/1e6:.2f}M"
+        elif volume >= 1e3:
+            return f"{volume/1e3:.2f}K"
+        else:
+            return str(volume)
+    except Exception as e:
+        logger.error(f"Error formatting volume: {str(e)}")
+        return "N/A"
+
+# Log when module is loaded
+logger.info("Stock service initialized") 

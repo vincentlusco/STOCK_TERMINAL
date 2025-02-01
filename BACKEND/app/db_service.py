@@ -11,6 +11,9 @@ from pydantic import BaseModel
 from .settings import settings as app_settings
 from .database import get_mongo_db  # Change this line
 from pymongo.errors import OperationFailure
+from pymongo import MongoClient, ASCENDING
+from pymongo.database import Database
+from pymongo.collection import Collection
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -29,13 +32,120 @@ class User(BaseModel):
         )
 
 class DatabaseService:
-    def __init__(self):
-        """Initialize DatabaseService"""
-        self.db: Optional[AsyncIOMotorDatabase] = None
-        self.users = None
-        self.stocks = None
-        self.watchlists = None
-        self.client: Optional[AsyncIOMotorClient] = None
+    def __init__(self, connection_string: str):
+        self.client = AsyncIOMotorClient(connection_string)
+        self.db = self.client.bloomberg_lite
+        self.stocks = self.db.stocks
+        self.users = self.db.users
+        self.watchlists = self.db.watchlists
+        self._init_indexes()
+
+    async def _init_indexes(self) -> None:
+        try:
+            # Create indexes if they don't exist
+            await self.stocks.create_index([("symbol", 1)], unique=True)
+            await self.users.create_index([("username", 1)], unique=True)
+            await self.users.create_index([("email", 1)], unique=True)
+            await self.watchlists.create_index([("user_id", 1)])
+            logger.info("Database collections and indexes initialized")
+        except Exception as e:
+            logger.error(f"Error initializing indexes: {e}")
+            raise
+
+    async def get_user_watchlist(self, user_id: str) -> Optional[List[str]]:
+        try:
+            watchlist = await self.watchlists.find_one({"user_id": user_id})
+            return watchlist.get("symbols", []) if watchlist else []
+        except Exception as e:
+            logger.error(f"Error getting watchlist: {e}")
+            return []
+
+    async def add_to_watchlist(self, user_id: str, symbol: str) -> bool:
+        try:
+            result = await self.watchlists.update_one(
+                {"user_id": user_id},
+                {"$addToSet": {"symbols": symbol}},
+                upsert=True
+            )
+            return result.modified_count > 0 or result.upserted_id is not None
+        except Exception as e:
+            logger.error(f"Error adding to watchlist: {e}")
+            return False
+
+    async def remove_from_watchlist(self, user_id: str, symbol: str) -> bool:
+        try:
+            result = await self.watchlists.update_one(
+                {"user_id": user_id},
+                {"$pull": {"symbols": symbol}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error removing from watchlist: {e}")
+            return False
+
+    async def store_stock_data(self, stock_data: Dict[str, Any]) -> bool:
+        try:
+            if not stock_data or "symbol" not in stock_data:
+                return False
+                
+            result = await self.stocks.update_one(
+                {"symbol": stock_data["symbol"]},
+                {"$set": stock_data},
+                upsert=True
+            )
+            return result.modified_count > 0 or result.upserted_id is not None
+        except Exception as e:
+            logger.error(f"Error storing stock data: {e}")
+            return False
+
+    async def get_stock_data(self, symbol: str) -> Optional[Dict[str, Any]]:
+        try:
+            result = await self.stocks.find_one({"symbol": symbol}, {"_id": 0})
+            return result
+        except Exception as e:
+            logger.error(f"Error retrieving stock data: {e}")
+            return None
+
+    async def verify_password(self, username: str, password: str) -> bool:
+        try:
+            user = await self.users.find_one({"username": username})
+            if not user:
+                return False
+            return bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8'))
+        except Exception as e:
+            logger.error(f"Error verifying password: {e}")
+            return False
+
+    async def create_user(self, username: str, email: str, password: str) -> Optional[Dict]:
+        try:
+            # Hash the password
+            hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+            
+            # Create user document
+            user = {
+                "username": username,
+                "email": email,
+                "password": hashed.decode('utf-8'),
+                "created_at": datetime.utcnow()
+            }
+            
+            # Insert the user
+            result = await self.users.insert_one(user)
+            user['_id'] = str(result.inserted_id)
+            return user
+        except Exception as e:
+            logger.error(f"Error creating user: {e}")
+            return None
+
+    async def get_user_by_username(self, username: str) -> Optional[Dict]:
+        try:
+            user = await self.users.find_one({"username": username})
+            if user:
+                user['_id'] = str(user['_id'])
+            return user
+        except Exception as e:
+            logger.error(f"Error getting user: {e}")
+            return None
 
     async def create_index_if_not_exists(self, collection, index_spec, **kwargs):
         """Create an index if it doesn't exist"""
@@ -58,6 +168,12 @@ class DatabaseService:
             self.users = self.db[app_settings.USERS_COLLECTION]
             self.stocks = self.db[app_settings.STOCKS_COLLECTION]
             self.watchlists = self.db[app_settings.WATCHLIST_COLLECTION]
+            
+            # Create TTL index for stocks collection
+            await self.db.stocks.create_index(
+                "expiration", 
+                expireAfterSeconds=0
+            )
             
             # Create indexes safely
             await self.create_index_if_not_exists(
@@ -105,38 +221,6 @@ class DatabaseService:
             self.client.close()
             logger.info("Database connection closed")
 
-    async def store_stock_data(self, data: StockData) -> bool:
-        """Store stock data with TTL index"""
-        try:
-            # Add expiration time (e.g., 5 minutes)
-            expiration = datetime.utcnow() + timedelta(minutes=5)
-            data_dict = data.dict()
-            data_dict['expiration'] = expiration
-            
-            result = await self.db.stocks.update_one(
-                {"symbol": data.symbol},
-                {"$set": data_dict},
-                upsert=True
-            )
-            return result.modified_count > 0 or result.upserted_id is not None
-        except Exception as e:
-            logger.error(f"Error storing stock data: {str(e)}")
-            return False
-
-    async def get_stock_data(self, symbol: str) -> Optional[StockData]:
-        """Get stock data if it exists and is not stale"""
-        try:
-            data = await self.db.stocks.find_one({
-                "symbol": symbol.upper(),
-                "expiration": {"$gt": datetime.utcnow()}
-            })
-            if data:
-                return StockData(**data)
-            return None
-        except Exception as e:
-            logger.error(f"Error retrieving stock data: {str(e)}")
-            return None
-
     async def get_user(self, username: str) -> Optional[UserInDB]:
         """Get user by username"""
         try:
@@ -149,63 +233,6 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Error getting user {username}: {str(e)}")
             return None
-
-    async def verify_password(self, username: str, password: str) -> bool:
-        """Verify user password"""
-        try:
-            from passlib.context import CryptContext
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            
-            user = await self.get_user(username)
-            if not user:
-                return False
-                
-            return pwd_context.verify(password, user.hashed_password)
-            
-        except Exception as e:
-            logger.error(f"Error verifying password: {str(e)}")
-            return False
-
-    async def create_user(self, user: UserCreate) -> UserInDB:
-        """Create new user"""
-        try:
-            if not self.db:
-                await self.connect()
-
-            # Check if username exists
-            existing_user = await self.db[app_settings.USERS_COLLECTION].find_one(
-                {"username": user.username}
-            )
-            if existing_user:
-                raise ValueError("Username already exists")
-
-            # Hash password
-            from passlib.context import CryptContext
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            hashed_password = pwd_context.hash(user.password)
-
-            # Create user document
-            user_dict = {
-                "username": user.username,
-                "email": user.email,
-                "hashed_password": hashed_password,
-                "created_at": datetime.utcnow(),
-                "watchlists": [],
-                "id": str(ObjectId())
-            }
-            del user_dict["password"]
-
-            # Insert into database
-            result = await self.db[app_settings.USERS_COLLECTION].insert_one(user_dict)
-            
-            if result.inserted_id:
-                user_dict["id"] = str(result.inserted_id)
-                return UserInDB(**user_dict)
-            return None
-
-        except Exception as e:
-            logger.error(f"Error creating user: {str(e)}")
-            raise
 
     async def create_watchlist(self, user_id: str, name: str = "Default") -> WatchList:
         """Create a new watchlist for user"""
@@ -240,115 +267,44 @@ class DatabaseService:
             logger.error(f"Error creating watchlist: {str(e)}")
             raise
 
-    async def get_watchlist(self, user_id: str, list_name: str = "Default") -> Optional[WatchList]:
+    async def get_watchlist(self, user_id: str, list_name: str = "Default") -> Optional[Dict[str, Any]]:
         """Get user's watchlist"""
         try:
-            watchlist_data = await self.db.watchlists.find_one({
+            logger.debug(f"Getting watchlist for user_id: {user_id}, list_name: {list_name}")
+            
+            # Get or create watchlist
+            watchlist = await self.watchlists.find_one({
                 "user_id": str(user_id),
                 "name": list_name
             })
-            if watchlist_data:
-                return WatchList(**watchlist_data)
-            return None
-        except Exception as e:
-            logger.error(f"Error getting watchlist: {str(e)}")
-            return None
-
-    async def get_user_watchlist(self, username: str) -> List[str]:
-        """Get user's watchlist"""
-        try:
-            # First get the user
-            user = await self.get_user(username)
-            if not user:
-                logger.error(f"User {username} not found")
-                return []
-
-            # Get watchlist document
-            watchlist_doc = await self.watchlists.find_one({"user_id": str(user.id)})
             
-            if watchlist_doc:
-                # Check if it's using the old format with 'symbols' array
-                if "symbols" in watchlist_doc:
-                    return watchlist_doc["symbols"]
-                # Check if it's using the new format with 'symbol' field
-                elif "symbol" in watchlist_doc:
-                    return [watchlist_doc["symbol"]]
-                else:
-                    logger.warning(f"Invalid watchlist format: {watchlist_doc}")
-                    return []
+            logger.debug(f"Found watchlist: {watchlist}")
             
-            logger.info(f"No watchlist found for user {username}")
-            return []
-
-        except Exception as e:
-            logger.error(f"Error getting watchlist for user {username}: {str(e)}")
-            return []
-
-    async def add_to_watchlist(self, username: str, symbol: str) -> bool:
-        """Add a symbol to user's watchlist"""
-        try:
-            user = await self.get_user(username)
-            if not user:
-                logger.error(f"User {username} not found")
-                return False
-
-            # Add symbol to the symbols array
-            result = await self.watchlists.update_one(
-                {"user_id": str(user.id)},
-                {
-                    "$addToSet": {
-                        "symbols": symbol.upper()
-                    },
-                    "$set": {
-                        "last_updated": datetime.utcnow().isoformat()
-                    },
-                    "$setOnInsert": {
-                        "user_id": str(user.id),
-                        "name": "Default",
-                        "created_at": datetime.utcnow().isoformat()
-                    }
-                },
-                upsert=True
-            )
-            
-            logger.info(f"Added {symbol} to watchlist for user {username}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error adding {symbol} to watchlist: {str(e)}")
-            return False
-
-    async def remove_from_watchlist(self, username: str, symbol: str) -> bool:
-        """Remove a symbol from user's watchlist"""
-        try:
-            user = await self.get_user(username)
-            if not user:
-                logger.error(f"User {username} not found")
-                return False
-
-            # Remove symbol from the symbols array
-            result = await self.watchlists.update_one(
-                {"user_id": str(user.id)},
-                {
-                    "$pull": {
-                        "symbols": symbol.upper()
-                    },
-                    "$set": {
-                        "last_updated": datetime.utcnow().isoformat()
-                    }
+            if not watchlist:
+                logger.debug(f"Creating new watchlist for user_id: {user_id}")
+                # Create new watchlist if it doesn't exist
+                watchlist = {
+                    "user_id": str(user_id),
+                    "name": list_name,
+                    "symbols": [],
+                    "created_at": datetime.utcnow(),
+                    "last_updated": datetime.utcnow()
                 }
-            )
+                try:
+                    await self.watchlists.insert_one(watchlist)
+                    logger.debug("New watchlist created successfully")
+                except Exception as insert_error:
+                    logger.error(f"Error creating watchlist: {str(insert_error)}")
+                    return {"symbols": []}
             
-            success = result.modified_count > 0
-            if success:
-                logger.info(f"Removed {symbol} from watchlist for user {username}")
-            else:
-                logger.warning(f"Symbol {symbol} not found in watchlist for user {username}")
-            return success
-
+            # Ensure the watchlist has a symbols field
+            if "symbols" not in watchlist:
+                watchlist["symbols"] = []
+            
+            return watchlist
         except Exception as e:
-            logger.error(f"Error removing {symbol} from watchlist: {str(e)}")
-            return False
+            logger.exception(f"Error getting watchlist for user_id {user_id}: {str(e)}")
+            return {"symbols": []}
 
     async def init_collections(self):
         try:

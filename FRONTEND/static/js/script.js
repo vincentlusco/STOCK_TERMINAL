@@ -3,6 +3,11 @@ let watchlist = new Set(JSON.parse(localStorage.getItem('watchlist') || '[]'));
 let watchlistRefreshInterval;
 const REFRESH_INTERVAL = 30000; // 30 seconds
 
+// Global variables and state
+let currentSymbol = '';
+const defaultSymbol = 'AAPL';
+let isLoading = false;
+
 // Formatting functions
 function formatNumber(num) {
     if (!num && num !== 0) return 'N/A';
@@ -88,28 +93,39 @@ function checkAuthStatus() {
     return true;
 }
 
-async function fetchStockData(symbol) {
-    if (!checkAuthStatus()) return;
-    
+async function fetchWithAuth(url, options = {}) {
+    const token = localStorage.getItem('token');
+    if (!token) {
+        console.error('No token found');
+        window.location.href = '/login';
+        return null;
+    }
+
+    const headers = {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...options.headers
+    };
+
     try {
-        const response = await fetch(`/api/stock/${symbol}`, {
-            headers: getAuthHeaders()
-        });
-        
-        if (response.status === 401) {
-            window.location.href = '/login';
-            return;
-        }
-        
+        const response = await fetch(url, { ...options, headers });
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
         }
-        
         return await response.json();
     } catch (error) {
-        console.error('Error fetching stock data:', error);
+        console.error('Fetch error:', error);
         throw error;
     }
+}
+
+async function fetchStockData(symbol) {
+    if (!symbol) {
+        throw new Error('Symbol is required');
+    }
+    console.log('Fetching stock data for:', symbol);
+    return await fetchWithAuth(`/api/stock/${symbol}`);
 }
 
 async function addToWatchlist(symbol) {
@@ -341,59 +357,63 @@ function setupAuthForms() {
     const registerForm = document.getElementById('registerForm');
 
     if (loginForm) {
-        loginForm.addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            
-            try {
-                const response = await fetch('/token', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    },
-                    body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-                });
-
-                if (!response.ok) {
-                    throw new Error('Login failed');
-                }
-
-                const data = await response.json();
-                localStorage.setItem('token', data.access_token);
-                window.location.href = '/quote';
-            } catch (error) {
-                showNotification('Login failed: ' + error.message, 'error');
-            }
-        });
+        loginForm.addEventListener('submit', handleLogin);
     }
 
     if (registerForm) {
-        registerForm.addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const username = document.getElementById('username').value;
-            const email = document.getElementById('email').value;
-            const password = document.getElementById('password').value;
-            
-            try {
-                const response = await fetch('/api/register', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ username, email, password })
-                });
+        registerForm.addEventListener('submit', handleRegister);
+    }
+}
 
-                if (!response.ok) {
-                    throw new Error('Registration failed');
-                }
-
-                showNotification('Registration successful! Please log in.', 'success');
-                window.location.href = '/login';
-            } catch (error) {
-                showNotification('Registration failed: ' + error.message, 'error');
-            }
+async function handleLogin(e) {
+    e.preventDefault();
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    
+    try {
+        const response = await fetch('/token', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
         });
+
+        if (!response.ok) {
+            throw new Error('Login failed');
+        }
+
+        const data = await response.json();
+        localStorage.setItem('token', data.access_token);
+        window.location.href = '/quote';
+    } catch (error) {
+        showNotification('Login failed: ' + error.message, 'error');
+    }
+}
+
+async function handleRegister(e) {
+    e.preventDefault();
+    const username = document.getElementById('username').value;
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    
+    try {
+        const response = await fetch('/api/register', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username, email, password })
+        });
+
+        if (!response.ok) {
+            throw new Error('Registration failed');
+        }
+
+        showNotification('Registration successful! Please log in.', 'success');
+        window.location.href = '/login';
+    } catch (error) {
+        showNotification('Registration failed: ' + error.message, 'error');
     }
 }
 
@@ -571,8 +591,8 @@ function updateStockInfo(data) {
             </div>
         </div>
         <div class="stock-details">
-            <div>Market Cap: ${formatMarketCap(data.market_cap) || 'N/A'}</div>
-            <div>Volume: ${formatNumber(data.volume) || 'N/A'}</div>
+            <div>Market Cap: ${formatMarketCap(data.market_cap)}</div>
+            <div>Volume: ${formatNumber(data.volume)}</div>
             <div>52W High: ${formatPrice(data.fifty_two_week_high) || 'N/A'}</div>
             <div>52W Low: ${formatPrice(data.fifty_two_week_low) || 'N/A'}</div>
         </div>
@@ -695,3 +715,269 @@ document.addEventListener('DOMContentLoaded', function() {
         window.location.href = '/login';
     }
 });
+
+// Error handling
+function showError(message) {
+    const errorDiv = document.getElementById('errorMessage') || createErrorDiv();
+    errorDiv.textContent = message;
+    errorDiv.style.display = 'block';
+    setTimeout(() => {
+        errorDiv.style.display = 'none';
+    }, 5000);
+}
+
+function createErrorDiv() {
+    const errorDiv = document.createElement('div');
+    errorDiv.id = 'errorMessage';
+    errorDiv.className = 'error-message';
+    document.body.insertBefore(errorDiv, document.body.firstChild);
+    return errorDiv;
+}
+
+// Utility functions
+function formatMarketCap(marketCap) {
+    if (!marketCap) return 'N/A';
+    if (marketCap >= 1e12) return `$${(marketCap / 1e12).toFixed(2)}T`;
+    if (marketCap >= 1e9) return `$${(marketCap / 1e9).toFixed(2)}B`;
+    if (marketCap >= 1e6) return `$${(marketCap / 1e6).toFixed(2)}M`;
+    return `$${marketCap.toFixed(2)}`;
+}
+
+function formatVolume(volume) {
+    if (!volume) return 'N/A';
+    if (volume >= 1e9) return `${(volume / 1e9).toFixed(2)}B`;
+    if (volume >= 1e6) return `${(volume / 1e6).toFixed(2)}M`;
+    if (volume >= 1e3) return `${(volume / 1e3).toFixed(2)}K`;
+    return volume.toString();
+}
+
+// Event handlers
+document.getElementById('stockSymbol')?.addEventListener('keypress', async (e) => {
+    if (e.key === 'Enter') {
+        const symbol = e.target.value.toUpperCase();
+        await updateStockDisplay(symbol);
+    }
+});
+
+document.getElementById('getQuoteBtn')?.addEventListener('click', async () => {
+    const symbol = document.getElementById('stockSymbol').value.toUpperCase();
+    await updateStockDisplay(symbol);
+});
+
+// Initialize with default stock
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        await updateStockDisplay(defaultSymbol);
+    } catch (error) {
+        console.error('Error loading default stock:', error);
+        showError('Error loading default stock data');
+    }
+});
+
+// Export functions for use in other scripts
+window.updateStockDisplay = updateStockDisplay;
+window.showError = showError;
+
+// Immediately declare all functions at the top
+const stockService = {
+    // State
+    currentSymbol: '',
+    defaultSymbol: 'AAPL',
+    isLoading: false,
+
+    // Core functions
+    async init() {
+        this.attachEventListeners();
+        await this.loadDefaultStock();
+    },
+
+    attachEventListeners() {
+        const symbolInput = document.getElementById('stockSymbol');
+        const quoteButton = document.getElementById('getQuoteBtn');
+
+        if (symbolInput) {
+            symbolInput.addEventListener('keypress', async (e) => {
+                if (e.key === 'Enter') {
+                    const symbol = e.target.value.toUpperCase();
+                    await this.updateStockDisplay(symbol);
+                }
+            });
+        }
+
+        if (quoteButton) {
+            quoteButton.addEventListener('click', async () => {
+                const symbol = document.getElementById('stockSymbol')?.value.toUpperCase();
+                if (symbol) {
+                    await this.updateStockDisplay(symbol);
+                }
+            });
+        }
+    },
+
+    async loadDefaultStock() {
+        try {
+            await this.updateStockDisplay(this.defaultSymbol);
+        } catch (error) {
+            console.error('Error loading default stock:', error);
+            this.showError('Error loading default stock data');
+        }
+    },
+
+    // API functions
+    async fetchWithAuth(url, options = {}) {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            console.error('No token found');
+            window.location.href = '/login';
+            return null;
+        }
+
+        const headers = {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            ...options.headers
+        };
+
+        try {
+            const response = await fetch(url, { ...options, headers });
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error('Fetch error:', error);
+            throw error;
+        }
+    },
+
+    async fetchStockData(symbol) {
+        if (!symbol) {
+            throw new Error('Symbol is required');
+        }
+        console.log('Fetching stock data for:', symbol);
+        return await this.fetchWithAuth(`/api/stock/${symbol}`);
+    },
+
+    // UI update functions
+    async updateStockDisplay(symbol) {
+        if (this.isLoading) return;
+        
+        try {
+            this.isLoading = true;
+            console.log('Fetching stock data for:', symbol);
+            
+            const data = await this.fetchStockData(symbol);
+            if (!data) {
+                throw new Error('No data received');
+            }
+
+            this.currentSymbol = symbol;
+            document.getElementById('stockSymbol').value = symbol;
+            
+            // Update stock info display
+            const stockInfo = document.getElementById('stockInfo');
+            if (stockInfo) {
+                const priceChangeClass = data.price_change >= 0 ? 'positive' : 'negative';
+                const priceChangeSign = data.price_change >= 0 ? '+' : '';
+
+                stockInfo.innerHTML = `
+                    <div class="stock-header">
+                        <h2>${data.company_name} (${data.symbol})</h2>
+                    </div>
+                    <div class="stock-price">
+                        <span class="current-price">$${data.current_price.toFixed(2)}</span>
+                        <span class="price-change ${priceChangeClass}">
+                            ${priceChangeSign}$${data.price_change.toFixed(2)} 
+                            (${priceChangeSign}${data.price_change_percent.toFixed(2)}%)
+                        </span>
+                    </div>
+                    <div class="stock-details">
+                        <div>Market Cap: ${this.formatMarketCap(data.market_cap)}</div>
+                        <div>Volume: ${this.formatVolume(data.volume)}</div>
+                        <div>52W High: $${data['52w_high']}</div>
+                        <div>52W Low: $${data['52w_low']}</div>
+                    </div>
+                `;
+            }
+
+            // Update chart
+            if (typeof window.createStockChart === 'function') {
+                await window.createStockChart(symbol);
+            }
+
+        } catch (error) {
+            console.error('Error updating stock display:', error);
+            this.showError(`Error loading stock data: ${error.message}`);
+        } finally {
+            this.isLoading = false;
+        }
+    },
+
+    formatMarketCap(marketCap) {
+        if (!marketCap) return 'N/A';
+        if (marketCap >= 1e12) return `$${(marketCap / 1e12).toFixed(2)}T`;
+        if (marketCap >= 1e9) return `$${(marketCap / 1e9).toFixed(2)}B`;
+        if (marketCap >= 1e6) return `$${(marketCap / 1e6).toFixed(2)}M`;
+        return `$${marketCap.toFixed(2)}`;
+    },
+
+    formatVolume(volume) {
+        if (!volume) return 'N/A';
+        if (volume >= 1e9) return `${(volume / 1e9).toFixed(2)}B`;
+        if (volume >= 1e6) return `${(volume / 1e6).toFixed(2)}M`;
+        if (volume >= 1e3) return `${(volume / 1e3).toFixed(2)}K`;
+        return volume.toString();
+    },
+
+    showError(message) {
+        const errorDiv = document.getElementById('errorMessage') || this.createErrorDiv();
+        errorDiv.textContent = message;
+        errorDiv.style.display = 'block';
+        setTimeout(() => {
+            errorDiv.style.display = 'none';
+        }, 5000);
+    },
+
+    createErrorDiv() {
+        const errorDiv = document.createElement('div');
+        errorDiv.id = 'errorMessage';
+        errorDiv.className = 'error-message';
+        document.body.insertBefore(errorDiv, document.body.firstChild);
+        return errorDiv;
+    }
+};
+
+// Event Listeners
+document.addEventListener('DOMContentLoaded', () => {
+    const symbolInput = document.getElementById('stockSymbol');
+    const quoteButton = document.getElementById('getQuoteBtn');
+
+    if (symbolInput) {
+        symbolInput.addEventListener('keypress', async (e) => {
+            if (e.key === 'Enter') {
+                const symbol = e.target.value.toUpperCase();
+                await stockService.updateStockDisplay(symbol);
+            }
+        });
+    }
+
+    if (quoteButton) {
+        quoteButton.addEventListener('click', async () => {
+            const symbol = document.getElementById('stockSymbol')?.value.toUpperCase();
+            if (symbol) {
+                await stockService.updateStockDisplay(symbol);
+            }
+        });
+    }
+
+    // Load default stock
+    stockService.updateStockDisplay(stockService.defaultSymbol).catch(error => {
+        console.error('Error loading default stock:', error);
+        stockService.showError('Error loading default stock data');
+    });
+});
+
+// Export functions for use in other scripts
+window.updateStockDisplay = (symbol) => stockService.updateStockDisplay(symbol);
+window.showError = (message) => stockService.showError(message);

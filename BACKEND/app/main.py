@@ -1,31 +1,73 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, Any, Optional
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+import os
+from typing import Dict, Any, Optional, List
 import yfinance as yf
 from app.db_service import DatabaseService
-from app.models import User, WatchList
-import jwt
+from app.models import User, WatchList, UserInDB
+from app.auth import get_current_user, router as auth_router
+from app.settings import settings
 from datetime import datetime, timedelta
+import pandas as pd
+from .stock_service import get_stock_data, get_stock_chart_data
+from .stock_service import StockService
+import logging
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Add CORS middleware
+# Add CORS middleware with settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your frontend domain
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=settings.CORS_METHODS,
+    allow_headers=settings.CORS_HEADERS,
 )
 
+# Mount static files
+app.mount("/static", StaticFiles(directory="../FRONTEND/static"), name="static")
+
+# Get MongoDB connection string from environment variable or use default
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+
 # Initialize database service
-db_service = DatabaseService()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+db_service = DatabaseService(connection_string=MONGODB_URI)
+
+# Initialize stock service
+stock_service = StockService(db_service)
+
+# Include the auth router
+app.include_router(auth_router)
 
 # JWT settings
 SECRET_KEY = "your-secret-key"  # Change this in production!
 ALGORITHM = "HS256"
+
+# Route handlers for HTML pages
+@app.get("/")
+async def read_root():
+    return FileResponse("../FRONTEND/static/html/index.html")
+
+@app.get("/login")
+async def read_login():
+    return FileResponse("../FRONTEND/static/html/login.html")
+
+@app.get("/register")
+async def read_register():
+    return FileResponse("../FRONTEND/static/html/register.html")
+
+@app.get("/quote")
+async def read_quote():
+    return FileResponse("../FRONTEND/static/html/quote.html")
+
+@app.get("/watchlist")
+async def read_watchlist_page():
+    return FileResponse("../FRONTEND/static/html/watchlist.html")
 
 # Authentication endpoints
 @app.post("/token")
@@ -48,66 +90,91 @@ async def register(username: str, email: str, password: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# Stock data endpoints
-@app.get("/stock/{ticker}")
-async def get_stock_data(ticker: str, current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
-    try:
-        # First check cache
-        cached_data = await db_service.get_stock_data(ticker)
-        if cached_data:
-            return cached_data
+# API Endpoints
+@app.get("/api/user/profile")
+async def get_user_profile(current_user: UserInDB = Depends(get_current_user)):
+    return {
+        "username": current_user.username,
+        "email": current_user.email,
+        "watchlists": current_user.watchlists
+    }
 
-        # If not in cache, fetch from yfinance
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        
-        if not info:
-            raise HTTPException(status_code=404, detail=f"No data found for ticker {ticker}")
+@app.get("/api/stock/{ticker}")
+async def get_stock_data(ticker: str, current_user: UserInDB = Depends(get_current_user)):
+    try:
+        return await stock_service.get_stock_data(ticker)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/stock/{ticker}/chart")
+async def get_stock_chart(ticker: str, period: str = "6mo", current_user: UserInDB = Depends(get_current_user)):
+    try:
+        return await stock_service.get_stock_chart_data(ticker, period)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/watchlist/data")
+async def get_watchlist_data(current_user: User = Depends(get_current_user)):
+    try:
+        watchlist = await db_service.get_watchlist(str(current_user.id))
+        if watchlist is None:
+            return []
             
-        # Format the response
-        stock_data = {
-            "symbol": ticker.upper(),
-            "company_name": info.get("longName", "N/A"),
-            "current_price": info.get("currentPrice") or info.get("regularMarketPrice", 0),
-            "previous_close": info.get("previousClose", 0),
-            "open": info.get("open", 0),
-            "day_high": info.get("dayHigh", 0),
-            "day_low": info.get("dayLow", 0),
-            "volume": info.get("volume", 0),
-            "market_cap": info.get("marketCap", 0),
-            "pe_ratio": info.get("trailingPE", None),
-            "fifty_two_week_high": info.get("fiftyTwoWeekHigh", 0),
-            "fifty_two_week_low": info.get("fiftyTwoWeekLow", 0)
-        }
-        
-        # Cache the data
-        await db_service.store_stock_data(stock_data)
-        
+        stock_data = []
+        for symbol in watchlist.get('symbols', []):
+            data = await get_stock_data(symbol)
+            if data:
+                stock_data.append(data)
         return stock_data
     except Exception as e:
+        logger.exception(f"Error in get_watchlist_data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Watchlist endpoints
 @app.get("/watchlist")
-async def get_watchlist(current_user: User = Depends(get_current_user)):
+async def get_watchlist(current_user: UserInDB = Depends(get_current_user)):
     watchlist = await db_service.get_watchlist(str(current_user.id))
     if not watchlist:
         return {"symbols": []}
     return {"symbols": watchlist.symbols}
 
-@app.post("/watchlist/add/{ticker}")
-async def add_to_watchlist(ticker: str, current_user: User = Depends(get_current_user)):
-    success = await db_service.add_to_watchlist(str(current_user.id), ticker)
-    if not success:
-        raise HTTPException(status_code=400, detail="Failed to add to watchlist")
-    return {"message": f"Added {ticker} to watchlist"}
+@app.post("/api/watchlist/add")
+async def add_to_watchlist(
+    symbol: str = Body(..., embed=True),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol is required")
+            
+        success = db_service.add_to_watchlist(str(current_user.id), symbol)
+        if success:
+            return {"message": f"Added {symbol} to watchlist"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to add to watchlist")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/watchlist/remove/{ticker}")
-async def remove_from_watchlist(ticker: str, current_user: User = Depends(get_current_user)):
-    success = await db_service.remove_from_watchlist(str(current_user.id), ticker)
-    if not success:
-        raise HTTPException(status_code=400, detail="Failed to remove from watchlist")
-    return {"message": f"Removed {ticker} from watchlist"}
+@app.delete("/api/watchlist/remove")
+async def remove_from_watchlist(
+    symbol: str = Body(..., embed=True),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol is required")
+            
+        success = db_service.remove_from_watchlist(str(current_user.id), symbol)
+        if success:
+            return {"message": f"Removed {symbol} from watchlist"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to remove from watchlist")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Helper functions
 def create_access_token(data: dict):
@@ -117,21 +184,22 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+@app.get("/api/stock/{symbol}")
+async def get_stock(symbol: str):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except jwt.PyJWTError:
-        raise credentials_exception
-        
-    user = await db_service.get_user(username)
-    if user is None:
-        raise credentials_exception
-    return user
+        data = await get_stock_data(symbol)
+        if data:
+            return data
+        raise HTTPException(status_code=404, detail="Stock not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/stock/{symbol}/chart")
+async def get_stock_chart(symbol: str, period: str = "6mo"):
+    try:
+        data = await get_stock_chart_data(symbol, period)
+        if data:
+            return data
+        raise HTTPException(status_code=404, detail="Chart data not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
