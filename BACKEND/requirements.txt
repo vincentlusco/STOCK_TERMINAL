@@ -25,4 +25,4 @@ pyngrok==7.0.0
 python-dotenv==1.0.0
 
 # Additional Dependencies
-pydantic[email]==2.10.6 
+pydantic[email]==2.10.6
