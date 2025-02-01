@@ -3,57 +3,75 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quote - Bloomberg Terminal</title>
-    <base href="/" />
-    <link rel="stylesheet" href="static/css/styles.css">
-    <script>
-        // Check auth before loading page
-        const token = localStorage.getItem('token');
-        if (!token) {
-            window.location.href = '/login';
-        }
-    </script>
-    <!-- Add Plotly -->
+    <title>Bloomberg Terminal</title>
+    <link rel="stylesheet" href="/css/styles.css">
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 </head>
-<body>
-    <div class="container">
-        <h1>BLOOMBERG TERMINAL</h1>
-        <nav class="terminal-nav">
-            <!-- Nav will be populated by nav.js -->
-        </nav>
-        <div class="content">
-            <div class="search-container">
-                <input type="text" id="ticker" placeholder="Enter ticker symbol..." autocomplete="off">
-                <button onclick="getStockData()">GET QUOTE</button>
-                <button onclick="addToWatchlist()">ADD TO WATCHLIST</button>
-            </div>
-            <div id="stockData" class="stock-data"></div>
+<body class="terminal">
+    <div class="terminal-header">
+        <div class="terminal-title">BLOOMBERG TERMINAL</div>
+        <div class="terminal-nav">
+            <a href="/quote" class="active">QUOTES</a>
+            <a href="/watchlist">WATCHLIST</a>
+            <a href="javascript:void(0)" onclick="logout()">LOGOUT</a>
         </div>
     </div>
-    <script src="static/nav.js"></script>
-    <script src="static/script.js"></script>
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const token = localStorage.getItem('token');
-        if (!token) {
-            window.location.href = '/login';
-            return;
-        }
-        
-        const originalFetch = window.fetch;
-        window.fetch = function() {
-            let [resource, config] = arguments;
-            if (!config) {
-                config = {};
-            }
-            if (!config.headers) {
-                config.headers = {};
-            }
-            config.headers['Authorization'] = `Bearer ${token}`;
-            return originalFetch(resource, config);
-        };
-    });
-    </script>
+
+    <div class="terminal-main">
+        <div class="search-section">
+            <input type="text" id="ticker" placeholder="Enter ticker symbol..." class="terminal-input">
+            <button onclick="getStockData()" class="terminal-btn">GET QUOTE</button>
+            <button onclick="addToWatchlist(document.getElementById('ticker').value)" class="terminal-btn">ADD TO WATCHLIST</button>
+        </div>
+
+        <div class="data-section">
+            <div id="stockData" class="stock-data"></div>
+        </div>
+
+        <div class="chart-section">
+            <div id="stockChart" class="chart-container"></div>
+            <div class="chart-controls">
+                <div class="control-row">
+                    <span class="control-label">Chart Type:</span>
+                    <select id="chartType" class="terminal-select">
+                        <option value="candlestick">CANDLESTICK</option>
+                        <option value="line">LINE</option>
+                    </select>
+                    
+                    <span class="control-label">Period:</span>
+                    <select id="timePeriod" class="terminal-select">
+                        <option value="1mo">1M</option>
+                        <option value="3mo">3M</option>
+                        <option value="6mo" selected>6M</option>
+                        <option value="1y">1Y</option>
+                    </select>
+                </div>
+                
+                <div class="control-row">
+                    <span class="control-label">Indicators:</span>
+                    <label class="terminal-checkbox">
+                        <input type="checkbox" id="showVolume">
+                        VOL
+                    </label>
+                    <label class="terminal-checkbox">
+                        <input type="checkbox" id="showMA">
+                        MA
+                    </label>
+                    <label class="terminal-checkbox">
+                        <input type="checkbox" id="showBB">
+                        BB
+                    </label>
+                    <label class="terminal-checkbox">
+                        <input type="checkbox" id="showRSI">
+                        RSI
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/script.js"></script>
+    <script src="/js/auth.js"></script>
+    <script src="/js/chart.js"></script>
 </body>
 </html> 

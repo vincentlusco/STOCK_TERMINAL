@@ -1,40 +1,48 @@
-import uvicorn
-from app.config import init_mongodb, close_mongodb, settings
 import asyncio
-from pyngrok import ngrok
+import uvicorn
+from app.config import init_mongodb, close_mongodb
+from app import settings as app_settings
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def startup():
-    await init_mongodb()
+    """Initialize services on startup"""
+    try:
+        logger.info("Starting up services...")
+        logger.info(f"Using MongoDB URI: {app_settings.MONGO_URI}")
+        await init_mongodb()
+        logger.info("Services started successfully")
+    except Exception as e:
+        logger.error(f"Error during startup: {str(e)}")
+        raise
 
 async def shutdown():
-    await close_mongodb()
+    """Cleanup on shutdown"""
+    try:
+        await close_mongodb()
+        logger.info("Services shut down successfully")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     config = uvicorn.Config(
         "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        reload_dirs=["app"],
-        log_level="info"
+        host=app_settings.HOST,
+        port=app_settings.PORT,
+        reload=True
     )
-    
-    # Set up ngrok tunnel if in dev mode
-    if settings.DEV_MODE:
-        # Set up ngrok tunnel
-        ngrok.set_auth_token(settings.NGROK_AUTH_TOKEN)
-        tunnel = ngrok.connect(8000)
-        print(f"\n* ngrok tunnel \"{tunnel.public_url}\" -> \"http://localhost:8000\"\n")
-
     server = uvicorn.Server(config)
     
-    # Add startup and shutdown events
-    server.install_signal_handlers = lambda: None
-    
+    # Run startup
     asyncio.run(startup())
+    
     try:
+        # Start server
         server.run()
     finally:
-        asyncio.run(shutdown())
-        if settings.DEV_MODE:
-            ngrok.kill()  # Kill ngrok process on exit 
+        # Run shutdown
+        asyncio.run(shutdown()) 

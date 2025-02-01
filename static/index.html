@@ -4,29 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bloomberg Terminal</title>
-    <base href="/" />
-    <link rel="stylesheet" href="static/css/styles.css">
-    <script>
-        const token = localStorage.getItem('token');
-        if (!token) {
-            window.location.href = '/login';
-        }
-    </script>
+    <link rel="stylesheet" href="/css/styles.css">
 </head>
-<body class="main-page">
-    <div class="container">
-        <h1>BLOOMBERG TERMINAL</h1>
-        <nav class="terminal-nav">
-            <!-- Nav will be populated by nav.js -->
-        </nav>
-        <div class="content">
-            <div class="welcome-screen">
-                <h2>Welcome to Bloomberg Terminal</h2>
-                <p>Select an option above to begin</p>
-            </div>
-        </div>
-    </div>
-    <script src="static/nav.js"></script>
-    <script src="static/script.js"></script>
+<body>
+    <script>
+        // Redirect to login page immediately
+        window.location.href = '/login';
+    </script>
 </body>
 </html> 

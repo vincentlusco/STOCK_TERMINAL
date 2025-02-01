@@ -1,22 +1,40 @@
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from .stock_service import StockService
-from .config import init_mongodb, close_mongodb
-from .db_service import DatabaseService
+from .config import init_mongodb, close_mongodb, settings
+from .db_service import DatabaseService, User as DBUser
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 import os
 import logging
-from .models import User  # Add this at the top with other imports
+from .models import User, WatchlistAdd, WatchlistRemove  # Add this at the top with other imports
 from pydantic import BaseModel
 import plotly.graph_objects as go
 from time import time
 import asyncio
 import pandas as pd
+from .services.stock_service import stock_service, StockData
+from .database import get_mongo_db, get_sql_db  # Updated import
+from databases import Database
+from .auth import (
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    SECRET_KEY,
+    validate_token,
+    get_password_hash,
+    router as auth_router
+)
+from fastapi import status
+from dotenv import load_dotenv
+from fastapi.templating import Jinja2Templates
+from . import settings as app_settings  # Import as module
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # Set up logging
 logging.basicConfig(
@@ -59,22 +77,28 @@ db_service = None
 
 @app.on_event("startup")
 async def startup_db_client():
-    global db_service
-    logger.info("Starting application...")
+    """Initialize database connection on startup"""
     try:
+        logger.info("Starting application...")
         logger.info("Initializing MongoDB connection...")
+        
+        # Initialize MongoDB
         await init_mongodb()
         logger.info("MongoDB initialized successfully")
         
+        # Create and initialize database service
         logger.info("Creating database service...")
+        global db_service
         db_service = DatabaseService()
-        logger.info("Database service created")
+        await db_service.initialize()
         
+        # Initialize stock service
         logger.info("Initializing stock service...")
-        stock_service.init_db_service(db_service)
-        logger.info("Stock service initialized")
+        global stock_service
+        stock_service = StockService()
+        stock_service.set_db_service(db_service)
+        logger.info("Stock service initialized successfully")
         
-        logger.info("Application startup complete")
     except Exception as e:
         logger.error(f"Startup failed: {str(e)}")
         raise
@@ -82,137 +106,86 @@ async def startup_db_client():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     await close_mongodb()
+    await get_mongo_db().disconnect()
 
-# Add these constants at the top
-SECRET_KEY = "your-secret-key-here"  # Change this!
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+# Verify SECRET_KEY at startup
+logger.info(f"main.py: Using SECRET_KEY from auth module: {SECRET_KEY[:10]}...")
+if not SECRET_KEY or SECRET_KEY == "your-256-bit-secret":
+    raise RuntimeError("Invalid SECRET_KEY, please check your .env file")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Add these new functions
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+# Mount static directories first
+app.mount("/js", StaticFiles(directory="static/js"), name="js")
+app.mount("/css", StaticFiles(directory="static/css"), name="css")
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=401,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    user = await db_service.get_user(username)
-    if user is None:
-        raise credentials_exception
-    return user
-
+# Route handlers for HTML pages
 @app.get("/")
-async def root():
-    return FileResponse(os.path.join(static_dir, "index.html"))
+async def read_root():
+    return RedirectResponse(url="/login")
+
+@app.get("/login")
+async def read_login():
+    return FileResponse("static/login.html")
+
+@app.get("/register")
+async def read_register():
+    return FileResponse("static/register.html")
 
 @app.get("/quote")
-async def quote_page(request: Request):
-    # For HTML requests, let the client-side handle auth
-    if request.headers.get("accept", "").startswith("text/html"):
-        return FileResponse(os.path.join(static_dir, "quote.html"))
-    
-    # For API requests, check auth header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        raise HTTPException(
-            status_code=401,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    try:
-        scheme, token = auth_header.split()
-        if scheme.lower() != "bearer":
-            raise HTTPException(status_code=401, detail="Invalid authentication scheme")
-        await get_current_user(token)
-    except Exception as e:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return FileResponse(os.path.join(static_dir, "quote.html"))
+async def read_quote():
+    return FileResponse("static/quote.html")
 
 @app.get("/watchlist")
-async def get_watchlist(request: Request):
-    # Check if this is an HTML request or API request
-    accept_header = request.headers.get("accept", "")
-    is_api_request = "application/json" in accept_header
-    
-    if not is_api_request:
-        return FileResponse(os.path.join(static_dir, "watchlist.html"))
-    
-    # For API requests, get user from request state (set by auth middleware)
-    current_user = getattr(request.state, "user", None)
-    if not current_user:
-        logger.error("No user found in request state")
-        raise HTTPException(
-            status_code=401,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-    
+async def read_watchlist():
+    return FileResponse("static/watchlist.html")
+
+@app.get("/api/watchlist/data")
+async def get_watchlist_data(current_user: User = Depends(get_current_user)):
     try:
         logger.info(f"Getting watchlist for user: {current_user.username}")
-        logger.debug(f"Request headers: {request.headers}")
+        # Get user's watchlist
+        watchlist = await db_service.get_user_watchlist(current_user.username)
         
-        watchlist = await db_service.get_watchlist(str(current_user.id))
-        if watchlist:
-            watchlist_dict = watchlist.dict()
-            logger.info(f"Found watchlist data: {watchlist_dict}")
-            return JSONResponse(
-                content=watchlist_dict,
-                headers={
-                    "Content-Type": "application/json",
-                    "Cache-Control": "no-cache"
-                }
-            )
+        # Get stock data for each symbol
+        stocks = []
+        for symbol in watchlist:
+            try:
+                stock_data = await stock_service.get_stock_data(symbol)
+                if stock_data:
+                    stocks.append(stock_data)
+            except Exception as e:
+                logger.error(f"Error fetching stock data for {symbol}: {str(e)}")
+                continue
         
-        # Create default watchlist if none exists
-        logger.info(f"Creating default watchlist for user: {current_user.username}")
-        watchlist = await db_service.create_watchlist(str(current_user.id))
-        return JSONResponse(
-            content=watchlist.dict(),
-            headers={
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache"
-            }
-        )
+        logger.info(f"Returning watchlist with {len(stocks)} stocks")
+        return {"stocks": stocks, "symbols": watchlist}
+        
     except Exception as e:
-        logger.error(f"Error getting watchlist: {str(e)}", exc_info=True)
+        logger.error(f"Error getting watchlist: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/stock/{ticker}")
-async def get_stock_data(ticker: str, request: Request):
+@app.get("/api/stock/{symbol}")
+async def get_stock_data(symbol: str):
     try:
-        logger.info(f"Fetching stock data for {ticker}")
-        data = await stock_service.get_stock_data(ticker)
-        if not data:
-            logger.error(f"No data found for ticker {ticker}")
-            raise HTTPException(status_code=404, detail=f"No data found for {ticker}")
+        logger.info(f"Fetching stock data for {symbol}")
+        if not stock_service:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Stock service not initialized"
+            )
             
-        logger.info(f"Successfully fetched data for {ticker}")
-        return data
+        stock_data = await stock_service.get_stock_data(symbol)
+        if not stock_data:
+            return {"message": f"No data found for symbol {symbol}"}
+            
+        return stock_data
     except Exception as e:
-        logger.error(f"Error fetching stock data for {ticker}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error fetching stock data for {symbol}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 @app.get("/stock/{ticker}/history")
 async def get_stock_history(ticker: str):
@@ -246,50 +219,113 @@ class UserCreate(BaseModel):
 # Update the register endpoint
 @app.post("/register")
 async def register_user(user: UserCreate):
+    """Register a new user"""
     try:
-        # Create the user
-        user_obj = await db_service.create_user(
-            username=user.username,
-            email=user.email,
-            password=user.password
-        )
-        # Create default watchlist
-        await db_service.create_watchlist(str(user_obj.id))
-        return {"message": "User created successfully"}
+        global db_service
+        logger.info(f"Registration attempt for user: {user.username}")
+        
+        if db_service is None:
+            error_msg = "Database service not initialized during registration"
+            logger.error(error_msg)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=error_msg
+            )
+
+        # Check if user exists
+        logger.info(f"Checking if user exists: {user.username}")
+        try:
+            existing_user = await db_service.get_user(user.username)
+            if existing_user:
+                error_msg = f"Username {user.username} already registered"
+                logger.warning(error_msg)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=error_msg
+                )
+        except Exception as e:
+            error_msg = f"Error checking existing user: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=error_msg
+            )
+
+        # Create new user
+        try:
+            logger.info("Creating password hash")
+            hashed_password = get_password_hash(user.password)
+            user_data = {
+                "username": user.username,
+                "email": user.email,
+                "hashed_password": hashed_password
+            }
+            
+            logger.info(f"Attempting to create user in database: {user.username}")
+            success = await db_service.create_user(user_data)
+            
+            if not success:
+                error_msg = "Failed to create user in database"
+                logger.error(error_msg)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=error_msg
+                )
+                
+            logger.info(f"Successfully created user: {user.username}")
+            return {"message": "User created successfully", "username": user.username}
+            
+        except Exception as e:
+            error_msg = f"Error creating user: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=error_msg
+            )
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Registration failed: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        error_msg = f"Unexpected error during registration: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
+# Add Token model
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
 @app.post("/token")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login endpoint"""
     try:
-        if not await db_service.verify_password(form_data.username, form_data.password):
+        user = await authenticate_user(form_data.username, form_data.password)
+        if not user:
             raise HTTPException(
-                status_code=401,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect username or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+            
         access_token = create_access_token(
-            data={"sub": form_data.username}, expires_delta=access_token_expires
+            data={"sub": user.username},
+            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
         
-        # Get user info
-        user = await db_service.get_user(form_data.username)
-        
         return {
-            "access_token": access_token,
+            "access_token": access_token, 
             "token_type": "bearer",
-            "username": user.username,
-            "redirect_url": "/quote"
+            "redirect_url": "/quote"  # Add redirect URL to response
         }
+        
     except Exception as e:
-        logger.error(f"Login failed: {str(e)}")
+        logger.error(f"Login error: {str(e)}")
         raise HTTPException(
-            status_code=401,
-            detail=str(e),
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
         )
 
 # Add watchlist endpoints
@@ -311,22 +347,33 @@ async def remove_from_watchlist(symbol: str, current_user: User = Depends(get_cu
         return {"message": f"Removed {symbol} from watchlist"}
     raise HTTPException(status_code=400, detail="Failed to remove from watchlist")
 
-# Add these routes after your existing routes
-@app.get("/login")
-async def login_page():
-    return FileResponse(os.path.join(static_dir, "login.html"))
+class UserProfile(BaseModel):
+    username: str
+    email: Optional[str] = None
+    watchlist: List[str] = []
 
-@app.get("/register")
-async def register_page():
-    return FileResponse(os.path.join(static_dir, "register.html"))
-
-@app.get("/api/user/profile")
-async def get_user_profile(current_user: User = Depends(get_current_user)):
-    return {
-        "username": current_user.username,
-        "email": current_user.email,
-        "watchlists": current_user.watchlists
-    }
+@app.get("/api/user/profile", response_model=UserProfile)
+async def get_user_profile(current_user: dict = Depends(get_current_user)):
+    try:
+        if isinstance(current_user, dict):
+            username = current_user.get("username")
+        else:
+            username = current_user.username
+            current_user = {"username": username, "email": getattr(current_user, "email", None)}
+            
+        watchlist = await db_service.get_user_watchlist(username)
+        
+        return UserProfile(
+            username=username,
+            email=current_user.get("email"),
+            watchlist=watchlist
+        )
+    except Exception as e:
+        logger.error(f"Error getting user profile: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 @app.post("/watchlist/create")
 async def create_watchlist(name: str, current_user: User = Depends(get_current_user)):
@@ -479,8 +526,28 @@ async def get_stock_chart(
         logger.error(f"Error in chart endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Serve static files last
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+@app.get("/api/stock/{symbol}/chart")
+async def get_stock_chart_data(
+    symbol: str,
+    period: str = '6mo',
+    current_user: User = Depends(get_current_user)
+):
+    """Get raw chart data for a stock"""
+    try:
+        logger.info(f"Getting chart data for {symbol} with period {period}")
+        history = await stock_service.get_stock_history(symbol, period)
+        
+        if not history:
+            raise HTTPException(status_code=404, detail=f"No historical data found for {symbol}")
+            
+        return history  # This already returns the correct JSON structure
+        
+    except Exception as e:
+        logger.error(f"Error getting chart data: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -532,21 +599,31 @@ async def auth_middleware(request: Request, call_next):
 
 @app.get("/health")
 async def health_check():
+    """Health check endpoint"""
     try:
-        # Test MongoDB connection
-        await mongo_client.admin.command('ping')
-        collections = await db.list_collection_names()
+        # Check MongoDB connection
+        db = await get_mongo_db()
+        await db.command("ping")
+        
+        # Check PostgreSQL connection
+        sql_db = await get_sql_db()
+        if not sql_db.is_connected:
+            await sql_db.connect()
+        
         return {
             "status": "healthy",
-            "mongodb": "connected",
-            "collections": collections
+            "mongo": "connected",
+            "postgres": "connected"
         }
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
-        return {
-            "status": "unhealthy",
-            "error": str(e)
-        }
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "detail": str(e)
+            }
+        )
 
 @app.middleware("http")
 async def add_performance_headers(request: Request, call_next):
@@ -555,3 +632,73 @@ async def add_performance_headers(request: Request, call_next):
     process_time = time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
     return response 
+
+# Add these models at the top with your other imports
+class WatchlistItem(BaseModel):
+    symbol: str
+
+class WatchlistResponse(BaseModel):
+    stocks: List[dict]
+
+@app.post("/api/watchlist/add")
+async def add_to_watchlist(
+    data: WatchlistAdd,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        # Verify the stock exists
+        stock_data = await stock_service.get_stock_data(data.symbol)
+        if not stock_data:
+            raise HTTPException(status_code=404, detail="Stock not found")
+        
+        # Add to watchlist
+        success = await db_service.add_to_watchlist(current_user.username, data.symbol)
+        if success:
+            return {"message": f"Added {data.symbol} to watchlist"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to add to watchlist")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding to watchlist: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/watchlist/remove")
+async def remove_from_watchlist(
+    data: WatchlistRemove,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        success = await db_service.remove_from_watchlist(current_user.username, data.symbol)
+        if success:
+            return {"message": f"Removed {data.symbol} from watchlist"}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to remove from watchlist")
+            
+    except Exception as e:
+        logger.error(f"Error removing from watchlist: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/validate-token")
+async def validate_token_endpoint(current_user: User = Depends(get_current_user)):
+    """Endpoint to validate JWT token"""
+    try:
+        return {"valid": True, "username": current_user.username}
+    except Exception as e:
+        logger.error(f"Error validating token: {str(e)}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# Include routers
+app.include_router(auth_router)
+
+# Add NGROK tunnel in development mode
+if app_settings.DEV_MODE and app_settings.NGROK_AUTH_TOKEN:
+    from pyngrok import ngrok
+    
+    # Set up ngrok
+    ngrok.set_auth_token(app_settings.NGROK_AUTH_TOKEN)
+    
+    # Open a tunnel
+    public_url = ngrok.connect(app_settings.PORT)
+    logger.info(f"\n* ngrok tunnel \"{public_url}\" -> \"http://localhost:{app_settings.PORT}\"") 

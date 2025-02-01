@@ -1,137 +1,111 @@
-import os
-from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 import asyncio
 from typing import Optional
 import logging
 from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
+from .database import set_mongo_db, init_db, close_mongo_connection, get_mongo_db
+from . import settings as app_settings  # Import as module
 
 # Set up logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# Load environment variables
-load_dotenv()
-
-# MongoDB Configuration
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "bloomberg_lite")
-
-# JWT Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-# MongoDB Collections
-STOCKS_COLLECTION = "stocks"
-WATCHLIST_COLLECTION = "watchlists"
-
-# Initialize MongoDB client
-mongo_client = None
-db = None
+# Initialize MongoDB client and database
+mongo_client: Optional[AsyncIOMotorClient] = None
+mongo_db: Optional[AsyncIOMotorDatabase] = None
 
 async def init_mongodb():
-    global mongo_client, db
-    retries = 3
-    retry_delay = 2  # seconds
-    
-    for attempt in range(retries):
-        try:
-            logger.info(f"Connecting to MongoDB (attempt {attempt + 1}/{retries})...")
-            mongo_client = AsyncIOMotorClient(
-                MONGO_URI,
-                serverSelectionTimeoutMS=5000,
-                maxPoolSize=50
-            )
-            db = mongo_client[DB_NAME]
-            
-            # Test connection
-            await mongo_client.admin.command('ping')
-            
-            # Drop existing indexes to avoid conflicts
+    """Initialize MongoDB connection"""
+    try:
+        logger.info("Connecting to MongoDB (attempt 1/3)...")
+        logger.info(f"Using MongoDB URI: {app_settings.MONGODB_URI}")
+        logger.info(f"Using Database: {app_settings.DATABASE_NAME}")
+        
+        # Initialize the database
+        db = await init_db()
+        logger.info("MongoDB connected successfully")
+        return db
+        
+    except Exception as e:
+        logger.error(f"Failed to connect to MongoDB: {str(e)}")
+        raise
+
+async def init_indexes(db: AsyncIOMotorDatabase) -> None:
+    """Initialize MongoDB indexes"""
+    try:
+        # Collections to index
+        collections = [
+            app_settings.STOCKS_COLLECTION,
+            app_settings.STOCK_HISTORY_COLLECTION,
+            app_settings.USERS_COLLECTION,
+            app_settings.WATCHLIST_COLLECTION
+        ]
+
+        # Drop existing indexes
+        for collection in collections:
             try:
-                await db.stocks.drop_indexes()
-                await db.stock_history.drop_indexes()
-                await db.users.drop_indexes()
-                await db.watchlists.drop_indexes()
+                await db[collection].drop_indexes()
             except Exception as e:
-                logger.warning(f"Error dropping indexes: {str(e)}")
-            
-            # Create optimized indexes with explicit names
-            await db.stocks.create_index(
-                [("symbol", 1)], 
-                unique=True, 
-                name="idx_stocks_symbol_unique"
-            )
-            await db.stocks.create_index(
-                [("last_updated", 1)], 
-                expireAfterSeconds=300,
-                name="idx_stocks_ttl"
-            )
-            
-            await db.stock_history.create_index(
-                [("symbol", 1)], 
-                unique=True,
-                name="idx_history_symbol_unique"
-            )
-            await db.stock_history.create_index(
-                [("last_updated", 1)], 
-                expireAfterSeconds=86400,
-                name="idx_history_ttl"
-            )
-            
-            await db.users.create_index(
-                "username", 
-                unique=True,
-                name="idx_users_username_unique"
-            )
-            await db.users.create_index(
-                "email", 
-                unique=True,
-                name="idx_users_email_unique"
-            )
-            
-            await db.watchlists.create_index(
-                [("user_id", 1), ("name", 1)], 
-                unique=True,
-                name="idx_watchlist_userid_name_unique"
-            )
-            
-            # Add this to the init_mongodb function after creating indexes
-            try:
-                # Clear existing collections to ensure clean data
-                await db.stocks.delete_many({})
-                await db.stock_history.delete_many({})
-                logger.info("Cleared existing stock data cache")
-            except Exception as e:
-                logger.warning(f"Error clearing cache: {str(e)}")
-            
-            logger.info("MongoDB connected and indexes created successfully")
-            return
-            
-        except Exception as e:
-            logger.error(f"MongoDB connection attempt {attempt + 1} failed: {str(e)}")
-            if attempt < retries - 1:
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                await asyncio.sleep(retry_delay)
-            else:
-                raise
+                logger.warning(f"Error dropping indexes for {collection}: {str(e)}")
+
+        # Create new indexes
+        await db[app_settings.STOCKS_COLLECTION].create_index(
+            [("symbol", 1)], unique=True, name="idx_stocks_symbol_unique"
+        )
+        await db[app_settings.STOCKS_COLLECTION].create_index(
+            [("last_updated", 1)], expireAfterSeconds=300, name="idx_stocks_ttl"
+        )
+        
+        await db[app_settings.STOCK_HISTORY_COLLECTION].create_index(
+            [("symbol", 1)], unique=True, name="idx_history_symbol_unique"
+        )
+        await db[app_settings.STOCK_HISTORY_COLLECTION].create_index(
+            [("last_updated", 1)], expireAfterSeconds=86400, name="idx_history_ttl"
+        )
+        
+        await db[app_settings.USERS_COLLECTION].create_index(
+            "username", unique=True, name="idx_users_username_unique"
+        )
+        await db[app_settings.USERS_COLLECTION].create_index(
+            "email", unique=True, name="idx_users_email_unique"
+        )
+        
+        await db[app_settings.WATCHLIST_COLLECTION].create_index(
+            [("user_id", 1), ("name", 1)], unique=True, name="idx_watchlist_userid_name_unique"
+        )
+        
+        logger.info("MongoDB indexes created successfully")
+    except Exception as e:
+        logger.error(f"Error creating indexes: {str(e)}")
+        raise
 
 async def close_mongodb():
-    if mongo_client:
-        logger.info("Closing MongoDB connection...")
-        mongo_client.close()
+    """Close MongoDB connection"""
+    try:
+        await close_mongo_connection()
         logger.info("MongoDB connection closed")
+    except Exception as e:
+        logger.error(f"Error closing MongoDB connection: {str(e)}")
+        raise
 
-def get_db():
-    global db
-    if db is None:
+def get_db() -> AsyncIOMotorDatabase:
+    """Get MongoDB database instance"""
+    if mongo_db is None:
         raise Exception("Database not initialized. Call init_mongodb() first")
-    return db
+    return mongo_db
 
 class Settings:
-    HOST = os.getenv("HOST", "127.0.0.1")
-    PORT = int(os.getenv("PORT", 8000))
-    NGROK_AUTH_TOKEN = os.getenv("NGROK_AUTH_TOKEN", "")
-    DEV_MODE = os.getenv("DEV_MODE", "true").lower() == "true"
+    HOST = app_settings.HOST
+    PORT = app_settings.PORT
+    NGROK_AUTH_TOKEN = app_settings.NGROK_AUTH_TOKEN
+    DEV_MODE = app_settings.DEV_MODE
+
+class AppSettings:
+    MONGODB_URI: str = "mongodb://localhost:27017"
+    DATABASE_NAME: str = "bloomberg_lite"
+    STOCKS_COLLECTION: str = "stocks"
+    STOCK_HISTORY_COLLECTION: str = "stock_history"
+    USERS_COLLECTION: str = "users"
+    # ... rest of your settings ...
 
 settings = Settings() 

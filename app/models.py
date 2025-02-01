@@ -1,54 +1,64 @@
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from bson import ObjectId
 from pydantic import validator
 
+class UserBase(BaseModel):
+    username: str
+    email: EmailStr
+
+class UserCreate(UserBase):
+    password: str
+
+class UserInDB(UserBase):
+    id: str
+    hashed_password: str
+    watchlists: List[str] = []
+    created_at: datetime = datetime.utcnow()
+
+    class Config:
+        from_attributes = True
+
+class User(UserBase):
+    id: str
+    watchlist: List[str] = []
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class StockBase(BaseModel):
+    symbol: str
+
 class StockData(BaseModel):
     symbol: str
-    company_name: str
+    company_name: Optional[str] = None
     current_price: float
+    price_change: float
+    price_change_percent: float
     previous_close: float
-    open: float
-    day_high: float
-    day_low: float
     volume: int
     market_cap: float
-    pe_ratio: Optional[float] = None
-    fifty_two_week_high: Optional[float] = None
-    fifty_two_week_low: Optional[float] = None
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = datetime.utcnow()
 
-    model_config = ConfigDict(
-        json_encoders={
-            datetime: lambda v: v.isoformat() if v else None,
-            ObjectId: str
-        },
-        arbitrary_types_allowed=True
-    )
-
-    @validator('current_price', 'previous_close', 'open', 'day_high', 'day_low', 'market_cap', pre=True)
-    def convert_to_float(cls, v):
-        if isinstance(v, str):
-            return float(v)
-        return v
-
-    @validator('volume', pre=True)
-    def convert_to_int(cls, v):
-        if isinstance(v, str):
-            return int(v)
-        return v
-
-    def dict(self, *args, **kwargs):
-        d = super().dict(*args, **kwargs)
-        if d.get('last_updated'):
-            d['last_updated'] = self.last_updated.isoformat()
-        return d
+    class Config:
+        from_attributes = True
 
 class StockHistory(BaseModel):
     symbol: str
-    data: List[dict]  # List of daily price data
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    dates: List[str]
+    prices: List[float]
+    volumes: List[int]
+    period: str
+    last_updated: datetime
 
     model_config = ConfigDict(
         json_encoders={
@@ -57,22 +67,29 @@ class StockHistory(BaseModel):
         }
     )
 
-class User(BaseModel):
-    id: Optional[str] = Field(default_factory=lambda: str(ObjectId()))
-    username: str = Field(..., min_length=3, max_length=50)
-    email: EmailStr
-    hashed_password: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    watchlists: List[str] = Field(default_factory=list)
+class WatchlistItem(BaseModel):
+    symbol: str
+    added_at: datetime
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "username": "johndoe",
-                "email": "john@example.com",
-                "password": "secretpassword"
-            }
+class WatchlistAdd(BaseModel):
+    """Model for adding a stock to watchlist"""
+    symbol: str
+
+class WatchlistRemove(BaseModel):
+    """Model for removing a stock from watchlist"""
+    symbol: str
+
+class WatchlistResponse(BaseModel):
+    """Model for watchlist response"""
+    stocks: List[StockData]
+    message: Optional[str] = None
+
+    model_config = ConfigDict(
+        json_encoders={
+            datetime: lambda v: v.isoformat() if v else None,
+            ObjectId: str
         }
+    )
 
 class WatchList(BaseModel):
     user_id: str
@@ -116,4 +133,19 @@ class StockCache(BaseModel):
             ObjectId: str
         },
         arbitrary_types_allowed=True
-    ) 
+    )
+
+class StockResponse(BaseModel):
+    data: StockData
+    message: Optional[str] = None
+
+class ErrorResponse(BaseModel):
+    detail: str
+
+    def dict(self, *args, **kwargs):
+        d = super().dict(*args, **kwargs)
+        return {
+            "username": d["username"],
+            "email": d["email"],
+            "watchlists": d.get("watchlists", [])
+        } 

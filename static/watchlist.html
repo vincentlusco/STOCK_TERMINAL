@@ -4,41 +4,58 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Watchlist - Bloomberg Terminal</title>
-    <base href="/" />
-    <link rel="stylesheet" href="static/css/styles.css">
+    <link rel="stylesheet" href="/css/styles.css">
 </head>
-<body>
-    <div class="container">
-        <h1>BLOOMBERG TERMINAL</h1>
-        <nav class="terminal-nav">
-            <!-- Nav will be populated by nav.js -->
-        </nav>
-        <div class="content">
-            <div id="watchlistContent" class="watchlist-container">
-                <p class="loading">Loading watchlist...</p>
-            </div>
+<body class="terminal">
+    <div class="terminal-header">
+        <div class="terminal-title">BLOOMBERG TERMINAL</div>
+        <div class="terminal-nav">
+            <a href="/quote">QUOTES</a>
+            <a href="/watchlist" class="active">WATCHLIST</a>
+            <a href="javascript:void(0)" onclick="logout()">LOGOUT</a>
         </div>
     </div>
-    <script src="static/nav.js"></script>
-    <script src="static/script.js"></script>
+
+    <div class="terminal-main">
+        <div class="watchlist-container">
+            <table class="watchlist-table">
+                <thead>
+                    <tr>
+                        <th>SYMBOL</th>
+                        <th>COMPANY</th>
+                        <th>PRICE</th>
+                        <th>CHANGE</th>
+                        <th>PREV CLOSE</th>
+                        <th>VOLUME</th>
+                        <th>MKT CAP</th>
+                        <th>ACTION</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Data will be inserted here by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script src="/js/auth.js"></script>
+    <script src="/js/script.js"></script>
     <script>
-        // Check authentication
-        const token = localStorage.getItem('token');
-        if (!token) {
-            window.location.href = '/login';
-        } else {
-            // Initialize watchlist
-            document.addEventListener('DOMContentLoaded', async function() {
-                try {
-                    updateNav(); // Update navigation
-                    updateWatchlist();
-                    setInterval(updateWatchlist, 30000);
-                } catch (error) {
-                    console.error('Error:', error);
-                    window.location.href = '/login';
-                }
-            });
-        }
+        document.addEventListener('DOMContentLoaded', async function() {
+            if (!await validateToken()) {
+                window.location.href = '/login';
+                return;
+            }
+            
+            try {
+                await updateWatchlist();
+                setInterval(updateWatchlist, 30000); // Update every 30 seconds
+            } catch (error) {
+                console.error('Error:', error);
+                const container = document.querySelector('.watchlist-container');
+                container.innerHTML = '<p class="error">Error loading watchlist</p>';
+            }
+        });
     </script>
 </body>
 </html> 

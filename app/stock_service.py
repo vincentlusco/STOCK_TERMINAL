@@ -1,92 +1,117 @@
 import yfinance as yf
 from datetime import datetime, timedelta
 from .models import StockData, StockHistory
-from .config import get_db
+from .database import get_mongo_db
+from .config import settings
 import logging
 import asyncio
 import pandas as pd
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from .db_service import DatabaseService
+from . import settings as app_settings
+from fastapi import HTTPException
+from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError
 
 logger = logging.getLogger(__name__)
 
 class StockService:
     def __init__(self):
+        """Initialize StockService"""
+        self.db_service = None
         self.db = None
         self._cache_lock = asyncio.Lock()
         self._batch_size = 10  # For bulk operations
+        logger.info("StockService initialized")
 
-    def init_db_service(self, db_service):
-        self.db = get_db()
+    def set_db_service(self, db_service):
+        """Set the database service instance"""
+        if db_service is not None:  # Proper None check
+            self.db_service = db_service
+            self.db = db_service.db
+            logger.info("Database service set for StockService")
 
-    async def get_stock_data(self, ticker: str) -> Optional[StockData]:
-        """Get stock data with optimized caching"""
-        async with self._cache_lock:  # Prevent race conditions
-            try:
-                logger.info(f"Getting stock data for {ticker}")
+    async def init_db(self) -> None:
+        """Initialize database connection"""
+        try:
+            if self.db is None:  # Proper None check
+                self.db = await get_mongo_db()
+                logger.info("StockService initialized with MongoDB connection")
+        except Exception as e:
+            logger.error(f"Failed to initialize StockService: {str(e)}")
+            raise
+
+    async def get_stock_data(self, symbol: str):
+        try:
+            if self.db is None:
+                await self.init_db()
+
+            collection = self.db[app_settings.STOCKS_COLLECTION]
+            stock_data = await collection.find_one({"symbol": symbol})
+            
+            if stock_data is None or (datetime.now() - stock_data.get('timestamp', datetime.min)).seconds > 300:
+                logger.info(f"Fetching {symbol} data from yfinance")
+                ticker = yf.Ticker(symbol)
                 
-                # Check cache first
-                cached = await self.db.stocks.find_one({
-                    "symbol": ticker.upper(),
-                    "last_updated": {"$gt": datetime.utcnow() - timedelta(minutes=5)}
-                })
-                
-                if cached:
-                    logger.info(f"Cache hit for {ticker}")
-                    # Access the nested data structure
-                    if 'data' in cached:
-                        return StockData(**cached['data'])
-                    else:
-                        logger.warning(f"Cached data for {ticker} is malformed, fetching fresh data")
-                        # If cache is malformed, continue to fetch fresh data
-
-                # Fetch fresh data
-                logger.info(f"Cache miss for {ticker}, fetching from Yahoo")
-                stock = yf.Ticker(ticker)
-                info = await asyncio.to_thread(lambda: stock.info)  # Run in thread pool
-                
-                if not info:
-                    logger.error(f"No data returned from Yahoo Finance for {ticker}")
-                    return None
-
                 try:
-                    stock_data = StockData(
-                        symbol=ticker.upper(),
-                        company_name=info.get("longName", "N/A"),
-                        current_price=float(info.get("currentPrice", 0.0)),
-                        previous_close=float(info.get("previousClose", 0.0)),
-                        open=float(info.get("open", 0.0)),
-                        day_high=float(info.get("dayHigh", 0.0)),
-                        day_low=float(info.get("dayLow", 0.0)),
-                        volume=int(info.get("volume", 0)),
-                        market_cap=float(info.get("marketCap", 0)),
-                        pe_ratio=float(info.get("trailingPE", 0)) if info.get("trailingPE") else None,
-                        fifty_two_week_high=float(info.get("fiftyTwoWeekHigh", 0)) if info.get("fiftyTwoWeekHigh") else None,
-                        fifty_two_week_low=float(info.get("fiftyTwoWeekLow", 0)) if info.get("fiftyTwoWeekLow") else None,
-                        last_updated=datetime.utcnow()
-                    )
-
-                    # Cache the data
-                    await self.db.stocks.update_one(
-                        {"symbol": ticker.upper()},
-                        {
-                            "$set": {
-                                "data": stock_data.dict(),
-                                "symbol": ticker.upper(),
-                                "last_updated": datetime.utcnow()
-                            }
-                        },
+                    info = ticker.info
+                    if not info:
+                        raise HTTPException(status_code=404, detail=f"Stock data not found for {symbol}")
+                    
+                    # Get current price and calculate changes
+                    current_price = info.get("regularMarketPrice", 0)
+                    previous_close = info.get("previousClose", 0)
+                    price_change = current_price - previous_close if current_price and previous_close else 0
+                    price_change_percent = (price_change / previous_close * 100) if previous_close else 0
+                    
+                    stock_data = {
+                        "symbol": symbol,
+                        "company_name": info.get("longName", ""),
+                        "current_price": float(current_price),
+                        "price_change": float(price_change),
+                        "price_change_percent": float(price_change_percent),
+                        "previous_close": float(previous_close),
+                        "volume": int(info.get("regularMarketVolume", 0)),
+                        "market_cap": float(info.get("marketCap", 0)),
+                        "timestamp": datetime.utcnow()
+                    }
+                    
+                    await collection.update_one(
+                        {"symbol": symbol},
+                        {"$set": stock_data},
                         upsert=True
                     )
-
-                    return stock_data
-
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Error parsing Yahoo Finance data for {ticker}: {str(e)}")
-                    return None
-
-            except Exception as e:
-                logger.error(f"Error fetching stock data for {ticker}: {str(e)}")
-                raise
+                    
+                    return StockData(**stock_data)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing data for {symbol}: {str(e)}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error processing stock data: {str(e)}"
+                    )
+            
+            # Convert database data to StockData object
+            stock_dict = {
+                "symbol": stock_data.get("symbol"),
+                "company_name": stock_data.get("company_name", ""),
+                "current_price": float(stock_data.get("current_price", 0)),
+                "price_change": float(stock_data.get("price_change", 0)),
+                "price_change_percent": float(stock_data.get("price_change_percent", 0)),
+                "previous_close": float(stock_data.get("previous_close", 0)),
+                "volume": int(stock_data.get("volume", 0)),
+                "market_cap": float(stock_data.get("market_cap", 0)),
+                "timestamp": stock_data.get("timestamp", datetime.utcnow())
+            }
+            return StockData(**stock_dict)
+        
+        except Exception as e:
+            logger.error(f"Unexpected error fetching stock data for {symbol}: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error fetching stock data: {str(e)}"
+            )
 
     async def get_batch_stock_data(self, tickers: List[str]) -> Dict[str, StockData]:
         """Efficiently fetch multiple stocks"""
@@ -107,63 +132,32 @@ class StockService:
         
         return results
 
-    async def get_stock_history(self, ticker: str, period: str = "1y") -> Optional[StockHistory]:
-        """Get historical stock data with MongoDB caching"""
+    async def get_stock_history(self, symbol: str, period: str = '6mo'):
         try:
-            logger.info(f"Getting history for {ticker} with period {period}")
+            logger.info(f"Getting history for {symbol} with period {period}")
             
-            # Check MongoDB cache first
-            cached_history = await self.db.stock_history.find_one({
-                "symbol": ticker.upper(),
-                "last_updated": {"$gt": datetime.utcnow() - timedelta(hours=24)}
-            })
-
-            if cached_history:
-                logger.info(f"Found cached history for {ticker}")
-                return StockHistory(**cached_history)
-
-            # Fetch fresh data from Yahoo Finance
-            logger.info(f"Fetching fresh history for {ticker} from Yahoo Finance")
-            stock = yf.Ticker(ticker)
-            history = await asyncio.to_thread(lambda: stock.history(period=period))
-
-            if history.empty:
-                logger.error(f"No historical data found for ticker {ticker}")
-                return None
-
-            logger.info(f"Got {len(history)} data points for {ticker}")
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=period)
             
-            # Convert to list of dictionaries with proper date formatting
-            history_data = []
-            for index, row in history.iterrows():
-                # Convert timezone-aware datetime to string
-                date_str = index.strftime('%Y-%m-%d')
-                history_data.append({
-                    "date": date_str,
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
-                    "volume": int(row["Volume"])
-                })
-
-            # Create StockHistory object
-            stock_history = StockHistory(
-                symbol=ticker.upper(),
-                data=history_data,
-                last_updated=datetime.utcnow()
-            )
-
-            # Store in MongoDB
-            await self.db.stock_history.update_one(
-                {"symbol": ticker.upper()},
-                {"$set": stock_history.dict()},
-                upsert=True
-            )
-
-            logger.info(f"Successfully stored history for {ticker}")
-            return stock_history
+            if df.empty:
+                logger.error(f"No historical data found for {symbol}")
+                raise HTTPException(status_code=404, detail=f"No historical data found for {symbol}")
+            
+            # Format the data for the chart
+            history_data = {
+                "dates": df.index.strftime('%Y-%m-%d').tolist(),
+                "opens": df['Open'].tolist(),
+                "highs": df['High'].tolist(),
+                "lows": df['Low'].tolist(),
+                "closes": df['Close'].tolist(),
+                "volumes": df['Volume'].tolist()
+            }
+            
+            return history_data
 
         except Exception as e:
-            logger.error(f"Error fetching stock history for {ticker}: {str(e)}")
-            raise 
+            logger.error(f"Error fetching stock history for {symbol}: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error fetching stock history: {str(e)}"
+            ) 
