@@ -3,12 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Quote - Bloomberg Lite</title>
+    <title>Quote</title>
     <link rel="stylesheet" href="/static/css/styles.css">
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
+    <!-- Chart.js and required plugins -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@2.4.0/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.2.0/dist/chartjs-adapter-luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.1.1/dist/chartjs-chart-financial.min.js"></script>
 </head>
 <body class="main-page">
     <nav class="terminal-nav">
@@ -24,54 +25,70 @@
     </div>
 
     <div class="content">
-        <div id="stockData" class="stock-data">
-            <div class="stock-data-main">
-                <div class="stock-name">Tesla, Inc. (TSLA)</div>
-                <div class="stock-info">
-                    <span class="stock-price">$404.60</span>
-                    <span class="stock-change">$0.00 (0.00%)</span>
+        <div class="main-section">
+            <div id="stockData" class="stock-data">
+                <div class="stock-data-section">
+                    <div class="stock-name">Tesla, Inc. (TSLA)</div>
+                    <div class="stock-price">$404.60</div>
+                    <div class="stock-change">$0.00 (0.00%)</div>
+                </div>
+                
+                <div class="stock-data-section">
+                    <div class="stock-data-section-title">Market Data</div>
+                    <div class="stock-metrics">
+                        <div class="metric">
+                            <span class="metric-label">Market Cap</span>
+                            <span class="metric-value">$1.30T</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Volume</span>
+                            <span class="metric-value">83,089,760</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="stock-data-section">
+                    <div class="stock-data-section-title">Technical Data</div>
+                    <div class="stock-metrics">
+                        <div class="metric">
+                            <span class="metric-label">52W High</span>
+                            <span class="metric-value">$488.54</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">52W Low</span>
+                            <span class="metric-value">$138.80</span>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <div class="stock-metrics">
-                <div class="metric">
-                    <span class="metric-label">Market Cap</span>
-                    <span class="metric-value">$1.30T</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Volume</span>
-                    <span class="metric-value">83,089,760</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">52W High</span>
-                    <span class="metric-value">$488.54</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">52W Low</span>
-                    <span class="metric-value">$138.80</span>
-                </div>
-            </div>
-        </div>
-        <div class="chart-section">
-            <div id="chartContainer" class="chart-container"></div>
-            <div class="chart-controls">
-                <div class="chart-type">
-                    <span>Chart Type:</span>
-                    <select id="chartType">
-                        <option value="candlestick">CANDLESTICK</option>
-                    </select>
-                </div>
-                <div class="chart-period">
-                    <span>Period:</span>
-                    <select id="period">
-                        <option value="6M">6M</option>
-                    </select>
-                </div>
-                <div class="chart-indicators">
-                    <span>Indicators:</span>
-                    <label><input type="checkbox" id="vol"> VOL</label>
-                    <label><input type="checkbox" id="ma"> MA</label>
-                    <label><input type="checkbox" id="bb"> BB</label>
-                    <label><input type="checkbox" id="rsi"> RSI</label>
+            
+            <div class="chart-section">
+                <div id="chartContainer" class="chart-container"></div>
+                <div class="chart-controls">
+                    <div class="chart-type">
+                        <span>Chart Type:</span>
+                        <select id="chartType">
+                            <option value="candlestick">CANDLESTICK</option>
+                            <option value="line">LINE</option>
+                            <option value="area">AREA</option>
+                        </select>
+                    </div>
+                    <div class="chart-period">
+                        <span>Period:</span>
+                        <select id="period">
+                            <option value="1M">1M</option>
+                            <option value="3M">3M</option>
+                            <option value="6M" selected>6M</option>
+                            <option value="1Y">1Y</option>
+                        </select>
+                    </div>
+                    <div class="chart-indicators">
+                        <span>Indicators:</span>
+                        <label><input type="checkbox" id="vol"><span>VOL</span></label>
+                        <label><input type="checkbox" id="ma"><span>MA</span></label>
+                        <label><input type="checkbox" id="bb"><span>BB</span></label>
+                        <label><input type="checkbox" id="rsi"><span>RSI</span></label>
+                    </div>
                 </div>
             </div>
         </div>

@@ -1,6 +1,5 @@
 import yfinance as yf
 from datetime import datetime, timedelta
-from .models import StockData, StockHistory
 from .database import get_mongo_db
 from .config import settings
 import logging
@@ -13,14 +12,15 @@ from . import settings as app_settings
 from fastapi import HTTPException
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError
+from .models import StockData
 import os
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)  # Changed to DEBUG for more details
 logger = logging.getLogger(__name__)
 
-# Get MongoDB connection string from environment variable or use default
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+# Use settings for MongoDB configuration
+MONGODB_URI = app_settings.MONGO_URI
 logger.info(f"Initializing DatabaseService with URI: {MONGODB_URI}")
 
 # Initialize database service
@@ -30,7 +30,7 @@ async def init_db_service():
     global db_service
     if db_service is None:
         db_service = DatabaseService(MONGODB_URI)
-        await db_service._init_indexes()
+        await db_service.ensure_initialized()
     return db_service
 
 class StockService:
@@ -38,6 +38,7 @@ class StockService:
         self.db_service = db_service
         self._cache_lock = asyncio.Lock()
         self._batch_size = 10  # For bulk operations
+        self._cache_ttl = 300  # 5 minutes in seconds
         logger.info("StockService initialized")
 
     async def ensure_db_service(self):
@@ -49,7 +50,7 @@ class StockService:
         try:
             # Check cache first
             cached_data = await self.db_service.get_stock_data(symbol)
-            if cached_data and (datetime.now() - cached_data.get('timestamp', datetime.min)).seconds < 300:
+            if cached_data and (datetime.now() - cached_data.get('lastUpdated', datetime.min)).seconds < self._cache_ttl:
                 return cached_data
 
             # Fetch from yfinance if not cached or expired
@@ -72,10 +73,15 @@ class StockService:
                 "volume": int(info.get("regularMarketVolume", 0)),
                 "market_cap": float(info.get("marketCap", 0)),
                 "pe_ratio": float(info.get("trailingPE", 0) or 0),
-                "52w_high": float(info.get("fiftyTwoWeekHigh", 0)),
-                "52w_low": float(info.get("fiftyTwoWeekLow", 0)),
-                "timestamp": datetime.now()
+                "fifty_two_week_high": float(info.get("fiftyTwoWeekHigh", 0)),
+                "fifty_two_week_low": float(info.get("fiftyTwoWeekLow", 0)),
+                "lastUpdated": datetime.now()
             }
+
+            # Add error handling for NaN values
+            for key, value in stock_data.items():
+                if isinstance(value, float) and pd.isna(value):
+                    stock_data[key] = 0.0
 
             # Cache the data
             try:
@@ -125,10 +131,15 @@ class StockService:
             logger.debug("No tickers provided for batch stock data")
             return results
         
+        # Filter out invalid symbols
+        valid_tickers = [t.strip().upper() for t in tickers if t and isinstance(t, str)]
+        if len(valid_tickers) != len(tickers):
+            logger.warning(f"Filtered out {len(tickers) - len(valid_tickers)} invalid tickers")
+        
         logger.debug(f"Fetching batch stock data for tickers: {tickers}")
         
         try:
-            for chunk in [tickers[i:i + self._batch_size] for i in range(0, len(tickers), self._batch_size)]:
+            for chunk in [valid_tickers[i:i + self._batch_size] for i in range(0, len(valid_tickers), self._batch_size)]:
                 logger.debug(f"Processing chunk: {chunk}")
                 for ticker in chunk:
                     tasks.append(asyncio.create_task(self.get_stock_data(ticker)))
@@ -164,12 +175,17 @@ class StockService:
             # Format the data for the chart
             history_data = {
                 "dates": df.index.strftime('%Y-%m-%d').tolist(),
-                "opens": df['Open'].tolist(),
-                "highs": df['High'].tolist(),
-                "lows": df['Low'].tolist(),
-                "closes": df['Close'].tolist(),
+                "opens": df['Open'].round(2).tolist(),
+                "highs": df['High'].round(2).tolist(),
+                "lows": df['Low'].round(2).tolist(),
+                "prices": df['Close'].round(2).tolist(),
                 "volumes": df['Volume'].tolist()
             }
+            
+            # Validate data before returning
+            if not all(len(history_data[key]) == len(history_data['dates']) 
+                      for key in ['opens', 'highs', 'lows', 'prices', 'volumes']):
+                raise ValueError("Data arrays have mismatched lengths")
             
             return history_data
 

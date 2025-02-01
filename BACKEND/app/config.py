@@ -5,6 +5,9 @@ import logging
 from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
 from .database import set_mongo_db, init_db, close_mongo_connection, get_mongo_db
 from . import settings as app_settings  # Import as module
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from .settings import Settings
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -18,11 +21,14 @@ async def init_mongodb():
     """Initialize MongoDB connection"""
     try:
         logger.info("Connecting to MongoDB (attempt 1/3)...")
-        logger.info(f"Using MongoDB URI: {app_settings.MONGODB_URI}")
-        logger.info(f"Using Database: {app_settings.DATABASE_NAME}")
+        logger.info(f"Using MongoDB URI: {settings.MONGO_URI}")
+        logger.info(f"Using Database: {settings.DB_NAME}")
         
         # Initialize the database
         db = await init_db()
+        # Keep the connection alive
+        global mongo_db
+        mongo_db = db
         logger.info("MongoDB connected successfully")
         return db
         
@@ -88,10 +94,10 @@ async def close_mongodb():
         logger.error(f"Error closing MongoDB connection: {str(e)}")
         raise
 
-def get_db() -> AsyncIOMotorDatabase:
-    """Get MongoDB database instance"""
-    if mongo_db is None:
-        raise Exception("Database not initialized. Call init_mongodb() first")
+def get_db():
+    """Get the global MongoDB instance"""
+    if not mongo_db:
+        raise RuntimeError("Database not initialized. Call init_mongodb() first")
     return mongo_db
 
 class Settings:
@@ -99,13 +105,31 @@ class Settings:
     PORT = app_settings.PORT
     NGROK_AUTH_TOKEN = app_settings.NGROK_AUTH_TOKEN
     DEV_MODE = app_settings.DEV_MODE
+    CORS_ORIGINS = app_settings.CORS_ORIGINS
+    CORS_METHODS = app_settings.CORS_METHODS
+    CORS_HEADERS = app_settings.CORS_HEADERS
+    MONGO_URI = app_settings.MONGO_URI
+    DB_NAME = app_settings.DB_NAME
 
-class AppSettings:
-    MONGODB_URI: str = "mongodb://localhost:27017"
-    DATABASE_NAME: str = "bloomberg_lite"
-    STOCKS_COLLECTION: str = "stocks"
-    STOCK_HISTORY_COLLECTION: str = "stock_history"
-    USERS_COLLECTION: str = "users"
-    # ... rest of your settings ...
+settings = Settings()
 
-settings = Settings() 
+def create_app():
+    app = FastAPI(title="Bloomberg Lite API")
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=settings.CORS_METHODS,
+        allow_headers=settings.CORS_HEADERS,
+    )
+
+    @app.on_event("startup")
+    async def startup():
+        await init_db()
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        await close_mongo_connection()
+
+    return app 

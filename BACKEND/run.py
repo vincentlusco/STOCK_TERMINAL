@@ -1,18 +1,20 @@
 import asyncio
 import uvicorn
 from app.config import init_mongodb, close_mongodb
-from app import settings as app_settings
+from app.settings import settings
 import logging
 
-# Set up logging
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def startup():
     """Initialize services on startup"""
+    logger.info("Starting up services...")
+    logger.info(f"Using MongoDB URI: {settings.MONGO_URI}")
+    
     try:
-        logger.info("Starting up services...")
-        logger.info(f"Using MongoDB URI: {app_settings.MONGO_URI}")
+        # Initialize MongoDB
         await init_mongodb()
         logger.info("Services started successfully")
     except Exception as e:
@@ -29,20 +31,18 @@ async def shutdown():
         raise
 
 if __name__ == "__main__":
-    config = uvicorn.Config(
-        "app.main:app",
-        host=app_settings.HOST,
-        port=app_settings.PORT,
-        reload=True
-    )
-    server = uvicorn.Server(config)
-    
-    # Run startup
-    asyncio.run(startup())
-    
     try:
-        # Start server
-        server.run()
+        # Run startup tasks
+        asyncio.run(startup())
+        
+        # Start the server
+        uvicorn.run(
+            "app.main:app",
+            host=settings.HOST,
+            port=settings.PORT,
+            reload=True,
+            log_level="info"
+        )
     finally:
         # Run shutdown
         asyncio.run(shutdown()) 

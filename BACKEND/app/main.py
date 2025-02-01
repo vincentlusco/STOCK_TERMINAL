@@ -4,10 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import os
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 import yfinance as yf
 from app.db_service import DatabaseService
-from app.models import User, WatchList, UserInDB
+from app.models import User, UserInDB
 from app.auth import get_current_user, router as auth_router
 from app.settings import settings
 from datetime import datetime, timedelta
@@ -15,12 +16,21 @@ import pandas as pd
 from .stock_service import get_stock_data, get_stock_chart_data
 from .stock_service import StockService
 import logging
+from .config import init_mongodb, close_mongodb
+from .routes import stock, watchlist
 
 logger = logging.getLogger(__name__)
 
+settings = settings
+
+# Get the base directory
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+FRONTEND_DIR = BASE_DIR / "FRONTEND"
+STATIC_DIR = FRONTEND_DIR / "static"
+
 app = FastAPI()
 
-# Add CORS middleware with settings
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -30,7 +40,7 @@ app.add_middleware(
 )
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="../FRONTEND/static"), name="static")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Get MongoDB connection string from environment variable or use default
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
@@ -41,8 +51,10 @@ db_service = DatabaseService(connection_string=MONGODB_URI)
 # Initialize stock service
 stock_service = StockService(db_service)
 
-# Include the auth router
+# Include routers
 app.include_router(auth_router)
+app.include_router(stock.router)
+app.include_router(watchlist.router)
 
 # JWT settings
 SECRET_KEY = "your-secret-key"  # Change this in production!
@@ -51,28 +63,29 @@ ALGORITHM = "HS256"
 # Route handlers for HTML pages
 @app.get("/")
 async def read_root():
-    return FileResponse("../FRONTEND/static/html/index.html")
+    return FileResponse(str(STATIC_DIR / "html" / "index.html"))
 
 @app.get("/login")
 async def read_login():
-    return FileResponse("../FRONTEND/static/html/login.html")
+    return FileResponse(str(STATIC_DIR / "html" / "login.html"))
 
 @app.get("/register")
 async def read_register():
-    return FileResponse("../FRONTEND/static/html/register.html")
+    return FileResponse(str(STATIC_DIR / "html" / "register.html"))
 
 @app.get("/quote")
 async def read_quote():
-    return FileResponse("../FRONTEND/static/html/quote.html")
+    return FileResponse(str(STATIC_DIR / "html" / "quote.html"))
 
 @app.get("/watchlist")
 async def read_watchlist_page():
-    return FileResponse("../FRONTEND/static/html/watchlist.html")
+    return FileResponse(str(STATIC_DIR / "html" / "watchlist.html"))
 
 # Authentication endpoints
 @app.post("/token")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    if not await db_service.verify_password(form_data.username, form_data.password):
+    user = await db_service.get_user_by_username(form_data.username)
+    if not user or not pwd_context.verify(form_data.password, user.get('hashed_password', '')):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"
@@ -85,6 +98,14 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 @app.post("/register")
 async def register(username: str, email: str, password: str):
     try:
+        # Check if username exists
+        existing_user = await db_service.get_user_by_username(username)
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already registered"
+            )
+
         user = await db_service.create_user(username, email, password)
         return {"message": "User created successfully"}
     except ValueError as e:
@@ -203,3 +224,11 @@ async def get_stock_chart(symbol: str, period: str = "6mo"):
         raise HTTPException(status_code=404, detail="Chart data not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.on_event("startup")
+async def startup_event():
+    await init_mongodb()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_mongodb()

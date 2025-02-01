@@ -11,22 +11,21 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
 
-class UserInDB(UserBase):
-    id: str
-    hashed_password: str
-    watchlists: List[str] = []
-    created_at: datetime = datetime.utcnow()
-
-    class Config:
-        from_attributes = True
-
 class User(UserBase):
-    id: str
-    watchlists: List[str] = []
-    created_at: datetime
+    id: Optional[str] = None
+
+class UserInDB(User):
+    hashed_password: str
+    created_at: Optional[datetime] = None
+    watchlists: List[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
+        populate_by_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+            ObjectId: str
+        }
 
 class Token(BaseModel):
     access_token: str
@@ -42,12 +41,18 @@ class StockData(BaseModel):
     symbol: str
     company_name: Optional[str] = None
     current_price: float
+    open: float
+    day_high: float
+    day_low: float
     price_change: float
     price_change_percent: float
     previous_close: float
     volume: int
     market_cap: float
-    timestamp: datetime = datetime.utcnow()
+    pe_ratio: Optional[float] = None
+    fifty_two_week_high: Optional[float] = None
+    fifty_two_week_low: Optional[float] = None
+    lastUpdated: datetime = Field(default_factory=datetime.utcnow)
 
     class Config:
         from_attributes = True

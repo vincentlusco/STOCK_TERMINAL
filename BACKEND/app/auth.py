@@ -10,11 +10,10 @@ from typing import Optional
 from fastapi import FastAPI
 from fastapi.routing import APIRouter
 from pydantic import BaseModel
-from .database import get_mongo_db, get_sql_db
+from .database import get_mongo_db
 from .models import User, UserInDB, Token, TokenData
 from . import settings as app_settings  # Import settings directly
 from .db_service import DatabaseService
-from databases import Database
 
 # Load environment variables
 load_dotenv(override=True)
@@ -56,7 +55,7 @@ def get_password_hash(password: str) -> str:
 async def get_user(username: str) -> Optional[UserInDB]:
     """Get user from database"""
     try:
-        db = await get_mongo_db()
+        db = get_mongo_db()
         user_dict = await db[app_settings.USERS_COLLECTION].find_one({"username": username})
         if user_dict:
             return UserInDB(**user_dict)
@@ -104,10 +103,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserInDB:
         token_data = TokenData(username=username)
     except JWTError:
         raise credentials_exception
-    user = await get_user(username=token_data.username)
+    mongo_db = get_mongo_db()
+    user = await mongo_db.users.find_one({"username": username})
     if user is None:
         raise credentials_exception
-    return user
+    return UserInDB(**user)
 
 # Routes
 @router.post("/token", response_model=Token)
@@ -130,7 +130,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 async def register_user(user: User):
     """Register new user"""
     try:
-        db = await get_mongo_db()
+        db = get_mongo_db()
         
         # Check if username exists
         if await db[app_settings.USERS_COLLECTION].find_one({"username": user.username}):

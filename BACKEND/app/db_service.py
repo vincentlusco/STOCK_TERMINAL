@@ -1,22 +1,32 @@
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
-from .config import get_db
-from .models import StockData, User, WatchList, UserInDB, UserCreate
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClient
 import bcrypt
 import logging
 from bson import ObjectId
-from databases import Database
 from pydantic import BaseModel
 from .settings import settings as app_settings
-from .database import get_mongo_db  # Change this line
+from .database import get_mongo_db
 from pymongo.errors import OperationFailure
 from pymongo import MongoClient, ASCENDING
-from pymongo.database import Database
 from pymongo.collection import Collection
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+class UserInDB(BaseModel):
+    id: Optional[str] = None
+    username: str
+    email: str
+    created_at: datetime
+
+class WatchList(BaseModel):
+    id: Optional[str] = None
+    user_id: str
+    name: str
+    symbols: List[str]
+    created_at: datetime
+    last_updated: datetime
 
 class User(BaseModel):
     id: int
@@ -38,15 +48,47 @@ class DatabaseService:
         self.stocks = self.db.stocks
         self.users = self.db.users
         self.watchlists = self.db.watchlists
-        self._init_indexes()
+        self._initialized = False
+
+    async def ensure_initialized(self):
+        """Ensure database is initialized"""
+        if not self._initialized:
+            try:
+                # Test connection
+                await self.client.admin.command('ping')
+                logger.info("MongoDB connection test successful")
+                # Initialize indexes
+                await self._init_indexes()
+                self._initialized = True
+                logger.info("Database initialized successfully")
+            except Exception as e:
+                logger.error(f"Database initialization failed: {e}")
+                # Try to reconnect
+                try:
+                    self.client = AsyncIOMotorClient(app_settings.MONGO_URI)
+                    await self.client.admin.command('ping')
+                    logger.info("MongoDB reconnection successful")
+                except Exception as reconnect_error:
+                    logger.error(f"MongoDB reconnection failed: {reconnect_error}")
+                raise
 
     async def _init_indexes(self) -> None:
         try:
-            # Create indexes if they don't exist
+            # Drop existing indexes to avoid conflicts
+            await self.stocks.drop_indexes()
+            await self.users.drop_indexes()
+            await self.watchlists.drop_indexes()
+
             await self.stocks.create_index([("symbol", 1)], unique=True)
             await self.users.create_index([("username", 1)], unique=True)
             await self.users.create_index([("email", 1)], unique=True)
             await self.watchlists.create_index([("user_id", 1)])
+            # Add TTL index for stock data cache
+            await self.stocks.create_index(
+                "lastUpdated", 
+                expireAfterSeconds=300,  # 5 minutes
+                name="idx_stocks_ttl"
+            )
             logger.info("Database collections and indexes initialized")
         except Exception as e:
             logger.error(f"Error initializing indexes: {e}")
@@ -125,8 +167,9 @@ class DatabaseService:
             user = {
                 "username": username,
                 "email": email,
-                "password": hashed.decode('utf-8'),
-                "created_at": datetime.utcnow()
+                "hashed_password": hashed.decode('utf-8'),
+                "created_at": datetime.utcnow(),
+                "watchlists": []
             }
             
             # Insert the user
@@ -272,23 +315,19 @@ class DatabaseService:
         try:
             logger.debug(f"Getting watchlist for user_id: {user_id}, list_name: {list_name}")
             
-            # Get or create watchlist
             watchlist = await self.watchlists.find_one({
                 "user_id": str(user_id),
                 "name": list_name
             })
             
-            logger.debug(f"Found watchlist: {watchlist}")
-            
             if not watchlist:
                 logger.debug(f"Creating new watchlist for user_id: {user_id}")
-                # Create new watchlist if it doesn't exist
                 watchlist = {
                     "user_id": str(user_id),
                     "name": list_name,
                     "symbols": [],
-                    "created_at": datetime.utcnow(),
-                    "last_updated": datetime.utcnow()
+                    "created_at": datetime.utcnow().isoformat(),
+                    "last_updated": datetime.utcnow().isoformat()
                 }
                 try:
                     await self.watchlists.insert_one(watchlist)
@@ -331,61 +370,4 @@ class DatabaseService:
             
         except Exception as e:
             logger.error(f"Error initializing collections: {str(e)}")
-            raise
-
-async def get_user_by_id(db: Database, user_id: int) -> Optional[User]:
-    try:
-        query = """
-        SELECT id, username, email
-        FROM users
-        WHERE id = :user_id
-        """
-        user = await db.fetch_one(query=query, values={"user_id": user_id})
-        if user:
-            return User(
-                id=user['id'],
-                username=user['username'],
-                email=user['email']
-            )
-        return None
-    except Exception as e:
-        logger.error(f"Error getting user: {str(e)}")
-        return None
-
-async def get_user_watchlist(db: Database, user_id: int) -> List[str]:
-    try:
-        query = """
-        SELECT symbol
-        FROM watchlist
-        WHERE user_id = :user_id
-        """
-        results = await db.fetch_all(query=query, values={"user_id": user_id})
-        return [row['symbol'] for row in results]
-    except Exception as e:
-        logger.error(f"Error getting watchlist: {str(e)}")
-        return []
-
-async def add_to_watchlist(db: Database, user_id: int, symbol: str) -> bool:
-    try:
-        query = """
-        INSERT INTO watchlist (user_id, symbol)
-        VALUES (:user_id, :symbol)
-        ON CONFLICT (user_id, symbol) DO NOTHING
-        """
-        await db.execute(query=query, values={"user_id": user_id, "symbol": symbol})
-        return True
-    except Exception as e:
-        logger.error(f"Error adding to watchlist: {str(e)}")
-        return False
-
-async def remove_from_watchlist(db: Database, user_id: int, symbol: str) -> bool:
-    try:
-        query = """
-        DELETE FROM watchlist
-        WHERE user_id = :user_id AND symbol = :symbol
-        """
-        await db.execute(query=query, values={"user_id": user_id, "symbol": symbol})
-        return True
-    except Exception as e:
-        logger.error(f"Error removing from watchlist: {str(e)}")
-        return False 
+            raise 

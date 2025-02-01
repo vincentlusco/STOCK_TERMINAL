@@ -128,45 +128,31 @@ async function fetchStockData(symbol) {
     return await fetchWithAuth(`/api/stock/${symbol}`);
 }
 
-async function addToWatchlist(symbol) {
+async function addToWatchlist() {
+    const symbol = document.getElementById('ticker')?.value?.trim().toUpperCase();
     if (!symbol) {
-        console.error('No symbol provided');
+        showNotification('Please enter a valid symbol', 'error');
         return;
     }
 
     try {
         const response = await fetch('/api/watchlist/add', {
             method: 'POST',
-            headers: getAuthHeaders(),
-            body: JSON.stringify({ symbol: symbol.toString().toUpperCase() })
+            headers: {
+                ...getAuthHeaders(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ symbol })
         });
 
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to add to watchlist');
+            throw new Error('Failed to add to watchlist');
         }
 
-        // Update local watchlist
-        watchlist.add(symbol.toString().toUpperCase());
-        localStorage.setItem('watchlist', JSON.stringify([...watchlist]));
-        
-        // Update UI
-        const addButton = document.querySelector(`[data-action="add-to-watchlist"][data-symbol="${symbol}"]`);
-        if (addButton) {
-            addButton.textContent = 'Remove from Watchlist';
-            addButton.setAttribute('data-action', 'remove-from-watchlist');
-        }
-
-        showNotification('Added to watchlist', 'success');
-        
-        // Refresh watchlist if on watchlist page
-        if (window.location.pathname === '/watchlist') {
-            await updateWatchlist();
-        }
-
+        showNotification(`${symbol} added to watchlist`, 'success');
     } catch (error) {
         console.error('Error adding to watchlist:', error);
-        showNotification(error.message, 'error');
+        showNotification('Failed to add to watchlist', 'error');
     }
 }
 
@@ -436,9 +422,12 @@ async function initializeChart(symbol, period = '6mo') {
             return;
         }
 
-        // Create the chart using the data
-        // Note: This assumes you're using a charting library
-        // Implementation will depend on your chosen library
+        // Create the chart using createStockChart from chart.js
+        if (typeof createStockChart === 'function') {
+            await createStockChart(symbol);
+        } else {
+            console.error('createStockChart function not found');
+        }
         
     } catch (error) {
         console.error('Error creating chart:', error);
@@ -446,96 +435,73 @@ async function initializeChart(symbol, period = '6mo') {
     }
 }
 
-// Event listeners
-document.addEventListener('DOMContentLoaded', function() {
-    if (!checkAuth()) return;
-
-    const path = window.location.pathname;
-    
-    if (path === '/watchlist') {
-        updateWatchlist();
-        watchlistRefreshInterval = setInterval(updateWatchlist, REFRESH_INTERVAL);
-    } else if (path === '/quote') {
-        setupQuotePage();
+// Initialize when DOM is loaded
+document.addEventListener('DOMContentLoaded', async function() {
+    // Check authentication
+    const token = localStorage.getItem('token');
+    if (!token) {
+        window.location.href = '/login';
+        return;
     }
 
-    const searchForm = document.getElementById('search-form');
-    if (searchForm) {
-        searchForm.addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const symbol = document.getElementById('symbol').value.toUpperCase();
-            try {
-                const data = await fetchStockData(symbol);
-                updateStockInfo(data);
-                updateChart(data);
-            } catch (error) {
-                console.error('Error:', error);
-                alert('Error fetching stock data');
-            }
-        });
-    }
-
-    // Add click handlers for quick search buttons
-    const quickSearchButtons = document.querySelectorAll('.quick-search');
-    quickSearchButtons.forEach(button => {
-        button.addEventListener('click', async function(e) {
-            e.preventDefault();
-            const symbol = this.getAttribute('data-symbol');
-            if (!symbol) {
-                console.error('No symbol found on button');
-                return;
-            }
-            try {
-                const data = await fetchStockData(symbol);
-                updateStockInfo(data);
-                updateChart(data);
-            } catch (error) {
-                console.error('Error:', error);
-                alert('Error fetching stock data');
-            }
-        });
-    });
-
-    // Load default stock (AAPL) on page load
-    if (window.location.pathname === '/quote') {
-        fetchStockData('AAPL')
-            .then(data => {
-                updateStockInfo(data);
-                updateChart(data);
-            })
-            .catch(error => {
-                console.error('Error loading default stock:', error);
-            });
-    }
-
-    // Setup page specific functionality
-    if (window.location.pathname === '/quote') {
-        setupQuotePage();
-    }
-    if (window.location.pathname === '/login' || window.location.pathname === '/register') {
-        setupAuthForms();
-    }
-
-    // Add click handler for watchlist buttons
-    document.addEventListener('click', async function(event) {
-        const button = event.target;
-        if (button.hasAttribute('data-action') && button.hasAttribute('data-symbol')) {
-            const action = button.getAttribute('data-action');
-            const symbol = button.getAttribute('data-symbol');
-            
-            try {
-                if (action === 'add-to-watchlist') {
-                    await addToWatchlist(symbol);
-                } else if (action === 'remove-from-watchlist') {
-                    await removeFromWatchlist(symbol);
+    try {
+        // Set up event listeners
+        const tickerInput = document.getElementById('ticker');
+        if (tickerInput) {
+            tickerInput.addEventListener('keypress', async (e) => {
+                if (e.key === 'Enter') {
+                    await getStockData();
                 }
-            } catch (error) {
-                console.error('Error with watchlist action:', error);
-                showNotification(error.message, 'error');
-            }
+            });
+        }
+
+        const getQuoteBtn = document.getElementById('getQuoteBtn');
+        if (getQuoteBtn) {
+            getQuoteBtn.addEventListener('click', getStockData);
+        }
+
+        // Load default stock
+        const defaultSymbol = 'AAPL';
+        const data = await fetchStockData(defaultSymbol);
+        await updateStockInfo(data);
+    } catch (error) {
+        console.error('Error during initialization:', error);
+        showNotification('Error loading initial data', 'error');
+    }
+});
+
+function setupChartControls() {
+    // Chart type change
+    const chartTypeSelect = document.getElementById('chartType');
+    if (chartTypeSelect) {
+        chartTypeSelect.addEventListener('change', function() {
+            updateChartType(this.value);
+        });
+    }
+
+    // Period change
+    const periodSelect = document.getElementById('period');
+    if (periodSelect) {
+        periodSelect.addEventListener('change', function() {
+            updatePeriod(this.value);
+        });
+    }
+
+    // Indicator toggles
+    ['vol', 'ma', 'bb', 'rsi'].forEach(indicator => {
+        const checkbox = document.getElementById(indicator);
+        if (checkbox) {
+            checkbox.addEventListener('change', function() {
+                const symbol = document.getElementById('ticker')?.value || 'AAPL';
+                toggleIndicator(indicator.toUpperCase());
+                // Force chart update after toggling indicator
+                if (currentChart) {
+                    currentChart.update();
+                }
+            });
         }
     });
-});
+}
 
 // Function to show notifications
 function showNotification(message, type = 'info') {
@@ -564,46 +530,41 @@ window.setupAuthForms = setupAuthForms;
 window.initializeChart = initializeChart;
 
 // Function to update stock info in the UI
-function updateStockInfo(data) {
-    if (!data) return;
-    
-    const stockData = document.getElementById('stockData');
-    if (!stockData) return;
-
-    const stockInfo = document.createElement('div');
-    stockInfo.className = 'stock-info';
-    stockInfo.dataset.symbol = data.symbol;
-
-    // Format price change percentage with fallback
-    const priceChangePercent = data.price_change_percent !== undefined ? 
-        data.price_change_percent.toFixed(2) : '0.00';
-    
-    // Format price change with fallback
-    const priceChange = data.price_change !== undefined ? 
-        formatPrice(data.price_change) : '0.00';
-
-    stockInfo.innerHTML = `
-        <h2>${data.company_name || ''} (${data.symbol || ''})</h2>
-        <div class="price-info">
-            <div class="current-price">${formatPrice(data.current_price) || 'N/A'}</div>
-            <div class="price-change ${(data.price_change || 0) >= 0 ? 'positive' : 'negative'}">
-                ${priceChange} (${priceChangePercent}%)
+async function updateStockInfo(data) {
+    try {
+        if (!data) return;
+        
+        const stockData = document.getElementById('stockData');
+        if (!stockData) return;
+        
+        // Update the stock data display
+        stockData.innerHTML = `
+            <div class="stock-data-section">
+                <div class="stock-name">${data.company_name || data.name} (${data.symbol})</div>
+                <div class="stock-price">$${data.current_price || data.price}</div>
+                <div class="stock-change">${data.price_change || data.change} (${data.price_change_percent || data.changePercent}%)</div>
             </div>
-        </div>
-        <div class="stock-details">
-            <div>Market Cap: ${formatMarketCap(data.market_cap)}</div>
-            <div>Volume: ${formatNumber(data.volume)}</div>
-            <div>52W High: ${formatPrice(data.fifty_two_week_high) || 'N/A'}</div>
-            <div>52W Low: ${formatPrice(data.fifty_two_week_low) || 'N/A'}</div>
-        </div>
-    `;
-
-    stockData.innerHTML = '';
-    stockData.appendChild(stockInfo);
-
-    // Update chart after updating stock info
-    if (typeof updateChart === 'function') {
-        updateChart(data);
+            <div class="stock-data-section">
+                <div class="stock-data-section-title">Market Data</div>
+                <div class="stock-metrics">
+                    <div class="metric">
+                        <span class="metric-label">Market Cap</span>
+                        <span class="metric-value">${formatLargeNumber(data.market_cap || data.marketCap)}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Volume</span>
+                        <span class="metric-value">${formatLargeNumber(data.volume)}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // Update chart with symbol
+        if (data.symbol) {
+            await updateChart(data.symbol);
+        }
+    } catch (error) {
+        console.error('Error updating stock info:', error);
     }
 }
 
@@ -666,34 +627,16 @@ async function refreshWatchlist() {
 }
 
 // Update getStockData
-async function getStockData(symbol = null) {
+async function getStockData() {
+    const ticker = document.getElementById('ticker').value.toUpperCase();
+    if (!ticker) return;
+    
     try {
-        symbol = symbol || document.getElementById('ticker').value?.toUpperCase();
-        if (!symbol) {
-            console.log('No symbol provided');
-            return;
-        }
-
-        console.log('Fetching stock data for:', symbol);
-        const response = await fetch(`/api/stock/${symbol}`, {
-            headers: getAuthHeaders()
-        });
-
-        if (!response.ok) {
-            console.error('Stock fetch failed:', response.status, response.statusText);
-            throw new Error(`Failed to fetch stock data for ${symbol}`);
-        }
-
-        const data = await response.json();
-        debugLogStockData(data, 'Single Stock');
-        
-        updateStockInfo(data);
-        // Only create chart if we have valid data
-        if (data && data.symbol) {
-            createStockChart(symbol);
-        }
+        const data = await fetchStockData(ticker);
+        await updateStockInfo(data);
     } catch (error) {
-        console.error('Error loading stock:', error);
+        console.error('Error loading stock data:', error);
+        showNotification('Error loading stock data', 'error');
     }
 }
 
@@ -706,15 +649,6 @@ async function createStockChart(symbol) {
         console.error('Error creating chart:', error);
     }
 }
-
-// Initialize when DOM is loaded
-document.addEventListener('DOMContentLoaded', function() {
-    // Check if we have a token
-    const token = localStorage.getItem('token');
-    if (!token) {
-        window.location.href = '/login';
-    }
-});
 
 // Error handling
 function showError(message) {
@@ -750,234 +684,3 @@ function formatVolume(volume) {
     if (volume >= 1e3) return `${(volume / 1e3).toFixed(2)}K`;
     return volume.toString();
 }
-
-// Event handlers
-document.getElementById('stockSymbol')?.addEventListener('keypress', async (e) => {
-    if (e.key === 'Enter') {
-        const symbol = e.target.value.toUpperCase();
-        await updateStockDisplay(symbol);
-    }
-});
-
-document.getElementById('getQuoteBtn')?.addEventListener('click', async () => {
-    const symbol = document.getElementById('stockSymbol').value.toUpperCase();
-    await updateStockDisplay(symbol);
-});
-
-// Initialize with default stock
-document.addEventListener('DOMContentLoaded', async () => {
-    try {
-        await updateStockDisplay(defaultSymbol);
-    } catch (error) {
-        console.error('Error loading default stock:', error);
-        showError('Error loading default stock data');
-    }
-});
-
-// Export functions for use in other scripts
-window.updateStockDisplay = updateStockDisplay;
-window.showError = showError;
-
-// Immediately declare all functions at the top
-const stockService = {
-    // State
-    currentSymbol: '',
-    defaultSymbol: 'AAPL',
-    isLoading: false,
-
-    // Core functions
-    async init() {
-        this.attachEventListeners();
-        await this.loadDefaultStock();
-    },
-
-    attachEventListeners() {
-        const symbolInput = document.getElementById('stockSymbol');
-        const quoteButton = document.getElementById('getQuoteBtn');
-
-        if (symbolInput) {
-            symbolInput.addEventListener('keypress', async (e) => {
-                if (e.key === 'Enter') {
-                    const symbol = e.target.value.toUpperCase();
-                    await this.updateStockDisplay(symbol);
-                }
-            });
-        }
-
-        if (quoteButton) {
-            quoteButton.addEventListener('click', async () => {
-                const symbol = document.getElementById('stockSymbol')?.value.toUpperCase();
-                if (symbol) {
-                    await this.updateStockDisplay(symbol);
-                }
-            });
-        }
-    },
-
-    async loadDefaultStock() {
-        try {
-            await this.updateStockDisplay(this.defaultSymbol);
-        } catch (error) {
-            console.error('Error loading default stock:', error);
-            this.showError('Error loading default stock data');
-        }
-    },
-
-    // API functions
-    async fetchWithAuth(url, options = {}) {
-        const token = localStorage.getItem('token');
-        if (!token) {
-            console.error('No token found');
-            window.location.href = '/login';
-            return null;
-        }
-
-        const headers = {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            ...options.headers
-        };
-
-        try {
-            const response = await fetch(url, { ...options, headers });
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({}));
-                throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
-            }
-            return await response.json();
-        } catch (error) {
-            console.error('Fetch error:', error);
-            throw error;
-        }
-    },
-
-    async fetchStockData(symbol) {
-        if (!symbol) {
-            throw new Error('Symbol is required');
-        }
-        console.log('Fetching stock data for:', symbol);
-        return await this.fetchWithAuth(`/api/stock/${symbol}`);
-    },
-
-    // UI update functions
-    async updateStockDisplay(symbol) {
-        if (this.isLoading) return;
-        
-        try {
-            this.isLoading = true;
-            console.log('Fetching stock data for:', symbol);
-            
-            const data = await this.fetchStockData(symbol);
-            if (!data) {
-                throw new Error('No data received');
-            }
-
-            this.currentSymbol = symbol;
-            document.getElementById('stockSymbol').value = symbol;
-            
-            // Update stock info display
-            const stockInfo = document.getElementById('stockInfo');
-            if (stockInfo) {
-                const priceChangeClass = data.price_change >= 0 ? 'positive' : 'negative';
-                const priceChangeSign = data.price_change >= 0 ? '+' : '';
-
-                stockInfo.innerHTML = `
-                    <div class="stock-header">
-                        <h2>${data.company_name} (${data.symbol})</h2>
-                    </div>
-                    <div class="stock-price">
-                        <span class="current-price">$${data.current_price.toFixed(2)}</span>
-                        <span class="price-change ${priceChangeClass}">
-                            ${priceChangeSign}$${data.price_change.toFixed(2)} 
-                            (${priceChangeSign}${data.price_change_percent.toFixed(2)}%)
-                        </span>
-                    </div>
-                    <div class="stock-details">
-                        <div>Market Cap: ${this.formatMarketCap(data.market_cap)}</div>
-                        <div>Volume: ${this.formatVolume(data.volume)}</div>
-                        <div>52W High: $${data['52w_high']}</div>
-                        <div>52W Low: $${data['52w_low']}</div>
-                    </div>
-                `;
-            }
-
-            // Update chart
-            if (typeof window.createStockChart === 'function') {
-                await window.createStockChart(symbol);
-            }
-
-        } catch (error) {
-            console.error('Error updating stock display:', error);
-            this.showError(`Error loading stock data: ${error.message}`);
-        } finally {
-            this.isLoading = false;
-        }
-    },
-
-    formatMarketCap(marketCap) {
-        if (!marketCap) return 'N/A';
-        if (marketCap >= 1e12) return `$${(marketCap / 1e12).toFixed(2)}T`;
-        if (marketCap >= 1e9) return `$${(marketCap / 1e9).toFixed(2)}B`;
-        if (marketCap >= 1e6) return `$${(marketCap / 1e6).toFixed(2)}M`;
-        return `$${marketCap.toFixed(2)}`;
-    },
-
-    formatVolume(volume) {
-        if (!volume) return 'N/A';
-        if (volume >= 1e9) return `${(volume / 1e9).toFixed(2)}B`;
-        if (volume >= 1e6) return `${(volume / 1e6).toFixed(2)}M`;
-        if (volume >= 1e3) return `${(volume / 1e3).toFixed(2)}K`;
-        return volume.toString();
-    },
-
-    showError(message) {
-        const errorDiv = document.getElementById('errorMessage') || this.createErrorDiv();
-        errorDiv.textContent = message;
-        errorDiv.style.display = 'block';
-        setTimeout(() => {
-            errorDiv.style.display = 'none';
-        }, 5000);
-    },
-
-    createErrorDiv() {
-        const errorDiv = document.createElement('div');
-        errorDiv.id = 'errorMessage';
-        errorDiv.className = 'error-message';
-        document.body.insertBefore(errorDiv, document.body.firstChild);
-        return errorDiv;
-    }
-};
-
-// Event Listeners
-document.addEventListener('DOMContentLoaded', () => {
-    const symbolInput = document.getElementById('stockSymbol');
-    const quoteButton = document.getElementById('getQuoteBtn');
-
-    if (symbolInput) {
-        symbolInput.addEventListener('keypress', async (e) => {
-            if (e.key === 'Enter') {
-                const symbol = e.target.value.toUpperCase();
-                await stockService.updateStockDisplay(symbol);
-            }
-        });
-    }
-
-    if (quoteButton) {
-        quoteButton.addEventListener('click', async () => {
-            const symbol = document.getElementById('stockSymbol')?.value.toUpperCase();
-            if (symbol) {
-                await stockService.updateStockDisplay(symbol);
-            }
-        });
-    }
-
-    // Load default stock
-    stockService.updateStockDisplay(stockService.defaultSymbol).catch(error => {
-        console.error('Error loading default stock:', error);
-        stockService.showError('Error loading default stock data');
-    });
-});
-
-// Export functions for use in other scripts
-window.updateStockDisplay = (symbol) => stockService.updateStockDisplay(symbol);
-window.showError = (message) => stockService.showError(message);
